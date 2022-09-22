@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>How To Write A Dumb Sanitizer - Enna1&#39;s blog</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="How To Write A Dumb Sanitizer" />
+<meta property="og:description" content="本文描述了如何实现一个简单的 sanitizer 。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="/post/dumbsanitizerhowto/" /><meta property="article:section" content="post" />
+<meta property="article:published_time" content="2022-06-02T00:00:00+00:00" />
+<meta property="article:modified_time" content="2022-06-02T00:00:00+00:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="Enna1&#39;s blog" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">Enna1&#39;s blog</div>
+					<div class="logo__tagline">Nobody dies a virgin, life fucks us all!</div>
+				</div>
+		</a>
+	</div>
+		
+<nav class="menu">
+	<button class="menu__btn" aria-haspopup="true" aria-expanded="false" tabindex="0">
+		<span class="menu__btn-title" tabindex="-1">Menu</span>
+	</button>
+	<ul class="menu__list">
+		<li class="menu__item">
+			<a class="menu__link" href="/">
+				
+				<span class="menu__text">home</span>
+				
+			</a>
+		</li>
+		<li class="menu__item">
+			<a class="menu__link" href="/post/">
+				
+				<span class="menu__text">blog</span>
+				
+			</a>
+		</li>
+		<li class="menu__item">
+			<a class="menu__link" href="/podcast/">
+				
+				<span class="menu__text">podcast</span>
+				
+			</a>
+		</li>
+		<li class="menu__item">
+			<a class="menu__link" href="/archives/">
+				
+				<span class="menu__text">archives</span>
+				
+			</a>
+		</li>
+		<li class="menu__item">
+			<a class="menu__link" href="/about/">
+				
+				<span class="menu__text">about</span>
+				
+			</a>
+		</li>
+	</ul>
+</nav>
+
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">How To Write A Dumb Sanitizer</h1>
+			<div class="post__meta meta">
+<div class="meta__item-datetime meta__item">
+	<svg class="meta__icon icon icon-time" width="16" height="14" viewBox="0 0 30 28"><path d="M15 0C7 0 1 6 1 14s6 14 14 14 14-6 14-14S23 0 15 0zm0 25C9 25 4 20 4 14S9 3 15 3s11 5 11 11-5 11-11 11zm1-18h-2v8.4l6.8 4.4L22 18l-6-3.8V7z"/></svg><time class="meta__text" datetime="2022-06-02T00:00:00Z">June 02, 2022</time></div><div class="meta__item-categories meta__item"><svg class="meta__icon icon icon-category" width="16" height="16" viewBox="0 0 16 16"><path d="m7 2l1 2h8v11h-16v-13z"/></svg><span class="meta__text"><a class="meta__link" href="/categories/sanitizer/" rel="category">Sanitizer</a>, <a class="meta__link" href="/categories/llvm/" rel="category">LLVM</a>
+	</span>
+</div></div>
+		</header>
+		<div class="content post__content clearfix">
+			<p>本文描述了如何实现一个简单的 sanitizer 。</p>
+<p>本文所实现的 DumbSanitizer 的完整代码见 <a href="https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16">DumbSanitizer.patch · GitHub</a>，基于 llvm 14.0.4。</p>
+<h2 id="introduction--what-is-a-sanitizer">Introduction — What is a sanitizer?</h2>
+<p>Sanitizers 是由 Google 开源的动态代码分析工具，包括：</p>
+<ul>
+<li>
+<p>AddressSanitizer (ASan)</p>
+</li>
+<li>
+<p>LeakSanitizer (LSan)</p>
+</li>
+<li>
+<p>ThreadSanitizer (TSan)</p>
+</li>
+<li>
+<p>UndefinedBehaviorSanitizer (UBSsan)</p>
+</li>
+<li>
+<p>MemorySanitizer (MSan)</p>
+</li>
+</ul>
+<p>所有的 Sanitizer 都由编译时插桩和运行时库两部分组成，Sanitizer 自 Clang 3.1 和 GCC 4.8 开始被集成在 Clang 和 GCC 中。</p>
+<p>例如 ASan 是用于检测 Use-after-free, heap-buffer-overflow, stack-buffer-overflow 等内存错误的。对于如下代码：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#75715e">// clang -O0 -g -fsanitize=address test.cpp &amp;&amp; ./a.out
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>(<span style="color:#66d9ef">int</span> argc, <span style="color:#66d9ef">char</span> <span style="color:#f92672">**</span>argv) {
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">int</span> <span style="color:#f92672">*</span>array <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> <span style="color:#66d9ef">int</span>[<span style="color:#ae81ff">100</span>];
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">delete</span> [] array;
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> array[argc];  <span style="color:#75715e">// BOOM
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>}
+</span></span></code></pre></div><p>使用命令 <code>clang -O0 -g -fsanitize=address test.cpp</code> 就可以得到开启 ASan 编译后的产物，然后运行编译产物 a.out 就会得到如下类似输入，说明在运行 a.out 时发现了一个 UAF：</p>
+<pre tabindex="0"><code>=================================================================
+==6254== ERROR: AddressSanitizer: heap-use-after-free on address 0x603e0001fc64 at pc 0x417f6a bp 0x7fff626b3250 sp 0x7fff626b3248
+READ of size 4 at 0x603e0001fc64 thread T0
+    #0 0x417f69 in main test.cpp:5
+    #1 0x7fae62b5076c (/lib/x86_64-linux-gnu/libc.so.6+0x2176c)
+    #2 0x417e54 (a.out+0x417e54)
+0x603e0001fc64 is located 4 bytes inside of 400-byte region [0x603e0001fc60,0x603e0001fdf0)
+freed by thread T0 here:
+    #0 0x40d4d2 in operator delete[](void*) llvm/projects/compiler-rt/lib/asan/asan_new_delete.cc:61
+    #1 0x417f2e in main test.cpp:4
+previously allocated by thread T0 here:
+    #0 0x40d312 in operator new[](unsigned long) llvm/projects/compiler-rt/lib/asan/asan_new_delete.cc:46
+    #1 0x417f1e in main test.cpp:3
+Shadow bytes around the buggy address:
+  0x1c07c0003f30: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x1c07c0003f40: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x1c07c0003f50: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x1c07c0003f60: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x1c07c0003f70: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+=&gt;0x1c07c0003f80: fa fa fa fa fa fa fa fa fa fa fa fa[fd]fd fd fd
+  0x1c07c0003f90: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x1c07c0003fa0: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+  0x1c07c0003fb0: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fa fa
+  0x1c07c0003fc0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x1c07c0003fd0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:     fa
+  Heap righ redzone:     fb
+  Freed Heap region:     fd
+  Stack left redzone:    f1
+  Stack mid redzone:     f2
+  Stack right redzone:   f3
+  Stack partial redzone: f4
+  Stack after return:    f5
+  Stack use after scope: f8
+  Global redzone:        f9
+  Global init order:     f6
+  Poisoned by user:      f7
+  ASan internal:         fe
+==6254== ABORTING
+</code></pre><h2 id="quick-start--writing-dumb-sanitizer">Quick Start — Writing dumb sanitizer</h2>
+<p>接下来这一节我们就来讲解下怎么实现一个简单的 Sanitizer（本文称之为 DumbSanitizer 或 DbSan）。我们的 DumbSanitizer 实现下述功能：对于程序中的每一个变量，我们都统计该变量在程序运行中被访问了多少次，并且在程序退出时打印出访问次数最多的变量。</p>
+<h3 id="compile-llvm-project-with-compiler-rt">Compile llvm project with compiler-rt</h3>
+<p>如何编译 llvm 可以参考 <a href="https://llvm.org/docs/CMake.html#quick-start">Building LLVM with CMake</a>，需要注意的是为了使用 Sanitizer 我们需要将 <code>compiler-rt</code> 加入到 LLVM_ENABLE_PROJECTS 这个 CMake varibale 里。</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-shell" data-lang="shell"><span style="display:flex;"><span>$ git clone -b llvmorg-14.0.4 https://github.com/llvm/llvm-project.git --depth <span style="color:#ae81ff">1</span>
+</span></span><span style="display:flex;"><span>$ cd llvm-project
+</span></span><span style="display:flex;"><span>$ cmake -DCMAKE_INSTALL_PREFIX<span style="color:#f92672">=</span><span style="color:#e6db74">${</span>HOME<span style="color:#e6db74">}</span>/llvm-bin -DCMAKE_BUILD_TYPE<span style="color:#f92672">=</span>Release -DLLVM_ENABLE_PROJECTS<span style="color:#f92672">=</span><span style="color:#e6db74">&#34;clang;compiler-rt&#34;</span> -DLLVM_TARGETS_TO_BUILD<span style="color:#f92672">=</span><span style="color:#e6db74">&#34;X86&#34;</span> -DLLVM_ENABLE_DUMP<span style="color:#f92672">=</span>ON ../llvm-project/llvm
+</span></span><span style="display:flex;"><span>$ make -j12
+</span></span><span style="display:flex;"><span>$ make install
+</span></span></code></pre></div><h3 id="implementing-the-instrumentation-pass">Implementing the instrumentation pass</h3>
+<p>我们在本文最开始提到：所有的 Sanitizer 都由编译时插桩和运行时库两部分组成，并且几乎所有的 Sanitizer 的插桩部分都是通过 LLVM pass 的方式实现的。我们的 DumbSanitizer 也不例外。（关于 LLVM pass 的编写，见 <a href="https://llvm.org/docs/WritingAnLLVMPass.html">Writing an LLVM Pass</a>）</p>
+<p>本节就来说明 DumbSanitizer 的插桩部分是如何实现的。</p>
+<p>这里只对一些关键点进行说明，完整实现见 <a href="https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16">DumbSanitizer.patch · GitHub</a> 中：</p>
+<ul>
+<li>
+<p>llvm-project/llvm/include/llvm/Transforms/Instrumentation/DumbSanitizer.h</p>
+</li>
+<li>
+<p>llvm-project/llvm/lib/Transforms/Instrumentation/DumbSanitizer.cpp。</p>
+</li>
+</ul>
+<p>首先说一下，我们实现 “对于程序中的每一个变量，统计该变量在程序运行中被访问了多少次，并且在程序退出时打印出访问次数最多的变量” 该功能的思路：</p>
+<ul>
+<li>
+<p>编译时插桩：对于每一次 memory access (load, store)，我们都会在此次 acccess 之前插入一个函数调用 (__dbsan_read, __dbsan_write)，该函数调用是在运行时库中实现的。</p>
+</li>
+<li>
+<p>运行时库：维护一个全局 map，该 map 记录了每一个 address 被访问的次数。函数 __dbsan_read, __db_write 的实现就是去更新该 map 中 key 为本次访问变量的 address 所对应的 value 的值。</p>
+</li>
+</ul>
+<p>即，程序使用 DumbSanitizer 编译后，每一次对变量 x 的读/写之前都会先调用 __dbsan_read/__dbsan_write，把变量 x 的地址传过去，__dbsan_read/__dbsan_write 会将 access_count_map[&amp;x]++。在程序退出时根据 access_count_map 的内容就能给出访问次数最多的变量/地址了。</p>
+<p>那么如何实现在每一次 memory access (load, store) 之前都插入一个函数调用 (__dbsan_read, __dbsan_write) 呢？核心代码其实非常简单：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span>SmallVector<span style="color:#f92672">&lt;</span>Instruction <span style="color:#f92672">*</span>, <span style="color:#ae81ff">16</span><span style="color:#f92672">&gt;</span> LoadsAndStores;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">auto</span> <span style="color:#f92672">&amp;</span>BB : F) {
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">auto</span> <span style="color:#f92672">&amp;</span>Inst : BB) {
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (isa<span style="color:#f92672">&lt;</span>LoadInst<span style="color:#f92672">&gt;</span>(Inst) <span style="color:#f92672">||</span> isa<span style="color:#f92672">&lt;</span>StoreInst<span style="color:#f92672">&gt;</span>(Inst))
+</span></span><span style="display:flex;"><span>      LoadsAndStores.push_back(<span style="color:#f92672">&amp;</span>Inst);
+</span></span><span style="display:flex;"><span>  }
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">auto</span> <span style="color:#f92672">*</span>Inst : LoadsAndStores) {
+</span></span><span style="display:flex;"><span>  IRBuilder<span style="color:#f92672">&lt;&gt;</span> IRB(Inst);
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">bool</span> IsWrite;
+</span></span><span style="display:flex;"><span>  Value <span style="color:#f92672">*</span>Addr <span style="color:#f92672">=</span> <span style="color:#66d9ef">nullptr</span>;
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">if</span> (LoadInst <span style="color:#f92672">*</span>LI <span style="color:#f92672">=</span> dyn_cast<span style="color:#f92672">&lt;</span>LoadInst<span style="color:#f92672">&gt;</span>(I)) {
+</span></span><span style="display:flex;"><span>    IsWrite <span style="color:#f92672">=</span> false;
+</span></span><span style="display:flex;"><span>    Addr <span style="color:#f92672">=</span> LI<span style="color:#f92672">-&gt;</span>getPointerOperand();
+</span></span><span style="display:flex;"><span>  } <span style="color:#66d9ef">else</span> <span style="color:#a6e22e">if</span> (StoreInst <span style="color:#f92672">*</span>SI <span style="color:#f92672">=</span> dyn_cast<span style="color:#f92672">&lt;</span>StoreInst<span style="color:#f92672">&gt;</span>(I)) {
+</span></span><span style="display:flex;"><span>    IsWrite <span style="color:#f92672">=</span> true;
+</span></span><span style="display:flex;"><span>    Addr <span style="color:#f92672">=</span> SI<span style="color:#f92672">-&gt;</span>getPointerOperand();
+</span></span><span style="display:flex;"><span>  }
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">if</span> (IsWrite) {
+</span></span><span style="display:flex;"><span>    IRB.CreateCall(DbsanWriteFunc, IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()));
+</span></span><span style="display:flex;"><span>  } <span style="color:#66d9ef">else</span> {
+</span></span><span style="display:flex;"><span>    IRB.CreateCall(DbsanReadFunc, IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()));
+</span></span><span style="display:flex;"><span>  }
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>简单解释一下。其实就是遍历 Function F 中的所有指令，收集其中的 LoadInst 和 StoreInst。然后对于每一个保存起来的 LoadInst 或 StoreInst，通过 IRBuilder 在其之前都插入一条 CallInst，被调函数就是 __dbsan_read 或 __dbsan_write。函数 __dbsan_read 或 __dbsan_write 只有一个参数，该参数就是 LoadInst 或 StoreInst 的 PointerOperand，即读写的 address。</p>
+<h3 id="implementing-the-runtime-library">Implementing the runtime library</h3>
+<p>介绍完编译时插桩的关键点后，再来介绍下运行时库的核心实现。</p>
+<p>DumbSanitizer 运行时库部分的核心实现见 <a href="https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16">DumbSanitizer.patch · GitHub</a> 中的：</p>
+<ul>
+<li>
+<p>llvm-project/compiler-rt/lib/dbsan/dbsan_interface.h</p>
+</li>
+<li>
+<p>llvm-project/compiler-rt/lib/dbsan/dbsan_interface.cpp</p>
+</li>
+<li>
+<p>llvm-project/compiler-rt/lib/dbsan/dbsan_rtl.h</p>
+</li>
+<li>
+<p>llvm-project/compiler-rt/lib/dbsan/dbsan_rtl.cpp</p>
+</li>
+</ul>
+<p>dbsan_interface.h 和 dbsan_interface.cpp 中是对暴露给外部的函数 __dbsan_read 和 __dbsan_write 的实现：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#a6e22e">__dbsan_read</span>(<span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>addr) { MemoryAccess((uptr)addr, kAccessRead); }
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#a6e22e">__dbsan_write</span>(<span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>addr) { MemoryAccess((uptr)addr, kAccessWrite); }
+</span></span></code></pre></div><p>可以看到 __dbsan_read 和 __dbsan_write 的实现就是对函数 MemoryAccess 的包装，MemoryAccess 的实现位于 dbsan_rtl.h 和 dbsan_rtl.cpp。</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#a6e22e">MemoryAccess</span>(uptr addr, AccessType typ) {
+</span></span><span style="display:flex;"><span>  ctx<span style="color:#f92672">-&gt;</span>access_count_map[addr]<span style="color:#f92672">++</span>;
+</span></span><span style="display:flex;"><span>  uptr access_count <span style="color:#f92672">=</span> ctx<span style="color:#f92672">-&gt;</span>access_count_map[addr];
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">if</span> (access_count <span style="color:#f92672">&gt;</span> ctx<span style="color:#f92672">-&gt;</span>most_frequently_accessed_count) {
+</span></span><span style="display:flex;"><span>    ctx<span style="color:#f92672">-&gt;</span>most_frequently_accessed_count <span style="color:#f92672">=</span> access_count;
+</span></span><span style="display:flex;"><span>    ctx<span style="color:#f92672">-&gt;</span>most_frequently_accessed_addr <span style="color:#f92672">=</span> addr;
+</span></span><span style="display:flex;"><span>  }
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>MemoryAccess 的实现也很简单，就是更新 access_count_map 中 key 为 addr 的 value 值，然后更新访问次数最多的 address。</p>
+<p>这里 ctx 是运行时库中维护的一个 Context 类型的全局变量：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#66d9ef">struct</span> <span style="color:#a6e22e">Context</span> {
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">bool</span> initialized;
+</span></span><span style="display:flex;"><span>  uptr most_frequently_accessed_addr;
+</span></span><span style="display:flex;"><span>  uptr most_frequently_accessed_count;
+</span></span><span style="display:flex;"><span>  __sanitizer<span style="color:#f92672">::</span>DenseMap<span style="color:#f92672">&lt;</span>uptr, uptr<span style="color:#f92672">&gt;</span> access_count_map;
+</span></span><span style="display:flex;"><span>};
+</span></span></code></pre></div><ul>
+<li>
+<p>most_frequently_accessed_addr 用于记录访问次数最多的地址</p>
+</li>
+<li>
+<p>most_frequently_accessed_count 用于记录最多的访问次数是多少</p>
+</li>
+<li>
+<p>access_count_map 则是记录了每一个地址被访问了多少次</p>
+</li>
+</ul>
+<p>最后讲一下我们是如何做到程序退出时打印访问次数最多的变量的。其实也很简单，就是通过 atexit 来注册程序退出时执行的函数，在该函数中直接打印我们在 Context 中保存的 most_frequently_accessed_addr 和 most_frequently_accessed_count 即可。</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">dbsan_atexit</span>() {
+</span></span><span style="display:flex;"><span>  __sanitizer<span style="color:#f92672">::</span>Printf(
+</span></span><span style="display:flex;"><span>      <span style="color:#e6db74">&#34;#Most frequently accessed address: %p, access count: %zd</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>,
+</span></span><span style="display:flex;"><span>      (<span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>)ctx<span style="color:#f92672">-&gt;</span>most_frequently_accessed_addr,
+</span></span><span style="display:flex;"><span>      ctx<span style="color:#f92672">-&gt;</span>most_frequently_accessed_count);
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><h3 id="integrating-the-sanitizer">Integrating the sanitizer</h3>
+<p>实现完 DumbSanitizer 的编译时插桩和运行时库这两个核心部分，剩下的就是将我们的 DumbSanitizer 集成在 clang/llvm 的编译流程中，使得能够通过编译选项 -fsanitize=dumb 来启用 DumbSanitizer。</p>
+<p>这部分修改的文件多且杂，没有什么需要特别说明的地方。这里只给出所需要修改的文件，详见 <a href="https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16">DumbSanitizer.patch · GitHub</a></p>
+<ul>
+<li>
+<p>llvm-project/clang/include/clang/Basic/Sanitizers.def，添加 DumbSanitizer 的定义</p>
+</li>
+<li>
+<p>llvm-project/clang/include/clang/Driver/SanitizerArgs.h，添加是否启用的 DumbSanitizer 的判断</p>
+</li>
+<li>
+<p>修改 llvm-project/clang/lib/CodeGen/BackendUtil.cpp，将 DumbSanitizer 的插桩 pass 添加至 pass manager</p>
+</li>
+<li>
+<p>修改 llvm-project/clang/lib/Driver/ToolChains/CommonArgs.cpp，如果启用了 DumbSanitizer，则链接 DumbSanitizer 的运行时库</p>
+</li>
+<li>
+<p>修改 llvm-project/clang/lib/Driver/ToolChains/Linux.cpp，定义 DumbSanitizer 所支持的架构，简单起见我们 DumbSanitizer 只支持 X86_64</p>
+</li>
+</ul>
+<h3 id="running-the-dumb-sanitizer">Running the dumb sanitizer</h3>
+<p>本节我们用一个例子来跑下 DumbSanitizer ，看看效果。</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#75715e">// clang++ -fsanitize=dumb test.cpp -o test
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// DBSAN_OPTIONS=&#39;print_frequent_access=1&#39; ./test
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stdio.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>(<span style="color:#66d9ef">int</span> argc, <span style="color:#66d9ef">char</span> <span style="color:#f92672">**</span>argv) {
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">int</span> r <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">int</span> i <span style="color:#f92672">=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>  printf(<span style="color:#e6db74">&#34;address of `r` is %p</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, <span style="color:#f92672">&amp;</span>r);
+</span></span><span style="display:flex;"><span>  printf(<span style="color:#e6db74">&#34;address of `i` is %p</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, <span style="color:#f92672">&amp;</span>i);
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">for</span> (; i <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">2</span>; <span style="color:#f92672">++</span>i) {
+</span></span><span style="display:flex;"><span>    r<span style="color:#f92672">++</span>;
+</span></span><span style="display:flex;"><span>  }
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> i <span style="color:#f92672">+</span> r;
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>这里我们在优化等级为 O0 的情况下，开启 DumbSanitizer（注：DumbSanitizer 是在所有的优化 pass 执行后，才执行插桩 pass，即 DumbSanitizer 插桩的是已经优化后的代码，可以尝试改变优化等级查看上述例子程序的输出）。</p>
+<p>在执行编译后的二进制时，我们设置了环境变量 DBSAN_OPTIONS，通过 DBSAN_OPTIONS 中的参数 print_frequent_access 为 1 还是 0 来控制在程序退出时是否打印访问次数最多的变量地址是什么。</p>
+<p>上述例子的运行结果如下所示：</p>
+<pre tabindex="0"><code>address of `r` is 0x7fff5817396c
+address of `i` is 0x7fff58173968
+#Most frequently accessed address: 0x7fff58173968, access count: 6
+</code></pre><p>可以看出被访问次数最多的变量是 i，被访问了的 6 次。</p>
+<p>感兴趣可以通过 LLVM IR 来分析这是为什么，这里就不再赘述了。</p>
+<pre tabindex="0"><code>define dso_local noundef i32 @main(i32 noundef %0, i8** noundef %1) #0 {
+  %3 = alloca i32, align 4
+  %4 = alloca i32, align 4
+  %5 = alloca i8**, align 8
+  %6 = alloca i32, align 4 ; address of r
+  %7 = alloca i32, align 4 ; address of i
+  %8 = bitcast i32* %3 to i8*
+  call void @__dbsan_write4(i8* %8)
+  store i32 0, i32* %3, align 4
+  %9 = bitcast i32* %4 to i8*
+  call void @__dbsan_write4(i8* %9)
+  store i32 %0, i32* %4, align 4
+  %10 = bitcast i8*** %5 to i8*
+  call void @__dbsan_write8(i8* %10)
+  store i8** %1, i8*** %5, align 8
+  %11 = bitcast i32* %6 to i8*
+  call void @__dbsan_write4(i8* %11) ; r = 0
+  store i32 0, i32* %6, align 4
+  %12 = bitcast i32* %7 to i8*
+  call void @__dbsan_write4(i8* %12) ; i = 1
+  store i32 1, i32* %7, align 4
+  %13 = call i32 (i8*, ...) @printf(i8* noundef getelementptr inbounds ([22 x i8], [22 x i8]* @.str, i64 0, i64 0), i32* noundef %6)
+  %14 = call i32 (i8*, ...) @printf(i8* noundef getelementptr inbounds ([22 x i8], [22 x i8]* @.str.1, i64 0, i64 0), i32* noundef %7)
+  br label %15
+
+15:                                               ; preds = %24, %2
+  %16 = bitcast i32* %7 to i8*
+  call void @__dbsan_read4(i8* %16); i &lt; 2
+  %17 = load i32, i32* %7, align 4
+  %18 = icmp slt i32 %17, 2
+  br i1 %18, label %19, label %29
+
+19:                                               ; preds = %15
+  %20 = bitcast i32* %6 to i8*
+  call void @__dbsan_read4(i8* %20) ; r&#39; = r (part1 of r++)
+  %21 = load i32, i32* %6, align 4
+  %22 = add nsw i32 %21, 1
+  %23 = bitcast i32* %6 to i8*
+  call void @__dbsan_write4(i8* %23) ; r = r&#39; + 1 (part2 of r++)
+  store i32 %22, i32* %6, align 4
+  br label %24
+
+24:                                               ; preds = %19
+  %25 = bitcast i32* %7 to i8*
+  call void @__dbsan_read4(i8* %25) ; i&#39; = i (part1 of ++i)
+  %26 = load i32, i32* %7, align 4
+  %27 = add nsw i32 %26, 1
+  %28 = bitcast i32* %7 to i8*
+  call void @__dbsan_write4(i8* %28) ; i = i&#39; + 1 (part2 of ++i)
+  store i32 %27, i32* %7, align 4
+  br label %15, !llvm.loop !4
+
+29:                                               ; preds = %15
+  %30 = bitcast i32* %7 to i8*
+  call void @__dbsan_read4(i8* %30) ; i&#39; = i (part1 of i + r)
+  %31 = load i32, i32* %7, align 4
+  %32 = bitcast i32* %6 to i8*
+  call void @__dbsan_read4(i8* %32) ; r&#39; = r (part2 of i + r)
+  %33 = load i32, i32* %6, align 4
+  %34 = add nsw i32 %31, %33 ; i&#39; + r&#39; (part 3 of i + r)
+  ret i32 %34
+}
+</code></pre><h2 id="references">References</h2>
+<ol>
+<li>
+<p><a href="https://github.com/google/sanitizers">GitHub - google/sanitizers: AddressSanitizer, ThreadSanitizer, MemorySanitizer</a></p>
+</li>
+<li>
+<p><a href="https://github.com/trailofbits/llvm-sanitizer-tutorial">GitHub - trailofbits/llvm-sanitizer-tutorial: An LLVM sanitizer tutorial</a></p>
+</li>
+</ol>
+		</div>
+		<footer class="post__footer">
+			
+<div class="post__tags tags clearfix">
+	<svg class="tags__badge icon icon-tag" width="16" height="16" viewBox="0 0 32 32"><path d="M32 19c0 1-1 2-1 2L21 31s-1 1-2 1-2-1-2-1L2 16c-1-1-1.4-2-1.4-2S0 12.5 0 11V3C0 1.5.8.8.8.8S1.5 0 3 0h8c1.5 0 3 .6 3 .6S15 1 16 2l15 15s1 1 1 2zM7 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/></svg>
+	<ul class="tags__list">
+		<li class="tags__item">
+			<a class="tags__link btn" href="/tags/sanitizer/" rel="tag">Sanitizer</a>
+		</li>
+		<li class="tags__item">
+			<a class="tags__link btn" href="/tags/llvm/" rel="tag">LLVM</a>
+		</li>
+	</ul>
+</div>
+		</footer>
+	</article>
+</main>
+
+
+
+
+			</div>
+			<aside class="sidebar"><div class="widget-search widget">
+	<form class="widget-search__form" role="search" method="get" action="https://google.com/search">
+		<label>
+			<input class="widget-search__field" type="search" placeholder="SEARCH…" value="" name="q" aria-label="SEARCH…">
+		</label>
+		<input class="widget-search__submit" type="submit" value="Search">
+		<input type="hidden" name="sitesearch" value="/">
+	</form>
+</div>
+<div class="widget-recent widget">
+	<h4 class="widget__title">Recent Posts</h4>
+	<div class="widget__content">
+		<ul class="widget__list">
+			<li class="widget__item"><a class="widget__link" href="/post/howsanitizerruntimeinit/">How Sanitizer Runtime Initialized</a></li>
+			<li class="widget__item"><a class="widget__link" href="/post/dumbsanitizerhowto/">How To Write A Dumb Sanitizer</a></li>
+		</ul>
+	</div>
+</div>
+<div class="widget-categories widget">
+	<h4 class="widget__title">Categories</h4>
+	<div class="widget__content">
+		<ul class="widget__list">
+			<li class="widget__item">
+				<a class="widget__link" href="/categories/llvm/">LLVM</a></li>
+			<li class="widget__item">
+				<a class="widget__link" href="/categories/sanitizer/">Sanitizer</a></li>
+		</ul>
+	</div>
+</div>
+<div class="widget-taglist widget">
+	<h4 class="widget__title">Tags</h4>
+	<div class="widget__content">
+		<a class="widget-taglist__link widget__link btn" href="/tags/llvm/" title="LLVM">LLVM</a>
+		<a class="widget-taglist__link widget__link btn" href="/tags/sanitizer/" title="Sanitizer">Sanitizer</a>
+	</div>
+</div>
+<div class="widget-social widget">
+	<h4 class="widget-social__title widget__title">Social</h4>
+	<div class="widget-social__content widget__content">
+		<div class="widget-social__item widget__item">
+			<a class="widget-social__link widget__link btn" title="GitHub" rel="noopener noreferrer" href="https://github.com/Enna1" target="_blank">
+				<svg class="widget-social__link-icon icon icon-github" width="24" height="24" viewBox="0 0 384 374"><path d="m192 0c-106.1 0-192 85.8-192 191.7 0 84.7 55 156.6 131.3 181.9 9.6 1.8 13.1-4.2 13.1-9.2 0-4.6-.2-16.6-.3-32.6-53.4 11.6-64.7-25.7-64.7-25.7-8.7-22.1-21.3-28-21.3-28-17.4-11.9 1.3-11.6 1.3-11.6 19.3 1.4 29.4 19.8 29.4 19.8 17.1 29.3 44.9 20.8 55.9 15.9 1.7-12.4 6.7-20.8 12.2-25.6-42.6-4.8-87.5-21.3-87.5-94.8 0-20.9 7.5-38 19.8-51.4-2-4.9-8.6-24.3 1.9-50.7 0 0 16.1-5.2 52.8 19.7 15.3-4.2 31.7-6.4 48.1-6.5 16.3.1 32.7 2.2 48.1 6.5 36.7-24.8 52.8-19.7 52.8-19.7 10.5 26.4 3.9 45.9 1.9 50.7 12.3 13.4 19.7 30.5 19.7 51.4 0 73.7-44.9 89.9-87.7 94.6 6.9 5.9 13 17.6 13 35.5 0 25.6-.2 46.3-.2 52.6 0 5.1 3.5 11.1 13.2 9.2 76.2-25.5 131.2-97.3 131.2-182 0-105.9-86-191.7-192-191.7z"/></svg>
+				<span>GitHub</span>
+			</a>
+		</div>
+		<div class="widget-social__item widget__item">
+			<a class="widget-social__link widget__link btn" title="Email" href="mailto:xumingjie.enna1@bytedance.com">
+				<svg class="widget-social__link-icon icon icon-mail" width="24" height="24" viewBox="0 0 416 288"><path d="m0 16v256 16h16 384 16v-16-256-16h-16-384-16zm347 16-139 92.5-139-92.5zm-148 125.5 9 5.5 9-5.5 167-111.5v210h-352v-210z"/></svg>
+				<span>xumingjie.enna1@bytedance.com</span>
+			</a>
+		</div>
+
+		
+		<div class="widget-social__item widget__item">
+			<a class="widget-social__link widget__link btn" title="Blog RSS" rel="noopener noreferrer" href="/post/index.xml" target="_blank">
+					<svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328 0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765 0 183.105 0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686 0 38.981 0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg>
+				<span>Blog RSS</span>
+			</a>
+		</div>
+		
+		<div class="widget-social__item widget__item">
+			<a class="widget-social__link widget__link btn" title="Podcast RSS" rel="noopener noreferrer" href="/podcast/index.xml" target="_blank">
+					<svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328 0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765 0 183.105 0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686 0 38.981 0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg>
+				<span>Podcast RSS</span>
+			</a>
+		</div>
+		
+	</div>
+</div>
+</aside>
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2022 Enna1.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>How Sanitizer Runtime Initialized - Enna1&#39;s blog</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="How Sanitizer Runtime Initialized" />
+<meta property="og:description" content="本文分析了 sanitizer runtime 是如何做到在程序启动之前进行初始化的。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="/post/howsanitizerruntimeinit/" /><meta property="article:section" content="post" />
+<meta property="article:published_time" content="2022-08-17T00:00:00+00:00" />
+<meta property="article:modified_time" content="2022-08-17T00:00:00+00:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="Enna1&#39;s blog" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">Enna1&#39;s blog</div>
+					<div class="logo__tagline">Nobody dies a virgin, life fucks us all!</div>
+				</div>
+		</a>
+	</div>
+		
+<nav class="menu">
+	<button class="menu__btn" aria-haspopup="true" aria-expanded="false" tabindex="0">
+		<span class="menu__btn-title" tabindex="-1">Menu</span>
+	</button>
+	<ul class="menu__list">
+		<li class="menu__item">
+			<a class="menu__link" href="/">
+				
+				<span class="menu__text">home</span>
+				
+			</a>
+		</li>
+		<li class="menu__item">
+			<a class="menu__link" href="/post/">
+				
+				<span class="menu__text">blog</span>
+				
+			</a>
+		</li>
+		<li class="menu__item">
+			<a class="menu__link" href="/podcast/">
+				
+				<span class="menu__text">podcast</span>
+				
+			</a>
+		</li>
+		<li class="menu__item">
+			<a class="menu__link" href="/archives/">
+				
+				<span class="menu__text">archives</span>
+				
+			</a>
+		</li>
+		<li class="menu__item">
+			<a class="menu__link" href="/about/">
+				
+				<span class="menu__text">about</span>
+				
+			</a>
+		</li>
+	</ul>
+</nav>
+
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">How Sanitizer Runtime Initialized</h1>
+			<div class="post__meta meta">
+<div class="meta__item-datetime meta__item">
+	<svg class="meta__icon icon icon-time" width="16" height="14" viewBox="0 0 30 28"><path d="M15 0C7 0 1 6 1 14s6 14 14 14 14-6 14-14S23 0 15 0zm0 25C9 25 4 20 4 14S9 3 15 3s11 5 11 11-5 11-11 11zm1-18h-2v8.4l6.8 4.4L22 18l-6-3.8V7z"/></svg><time class="meta__text" datetime="2022-08-17T00:00:00Z">August 17, 2022</time></div><div class="meta__item-categories meta__item"><svg class="meta__icon icon icon-category" width="16" height="16" viewBox="0 0 16 16"><path d="m7 2l1 2h8v11h-16v-13z"/></svg><span class="meta__text"><a class="meta__link" href="/categories/sanitizer/" rel="category">Sanitizer</a>, <a class="meta__link" href="/categories/llvm/" rel="category">LLVM</a>
+	</span>
+</div></div>
+		</header>
+		<div class="content post__content clearfix">
+			<p>本文分析了 sanitizer runtime 是如何做到在程序启动之前进行初始化的。</p>
+<h2 id="what-is-a-sanitizer">What is a sanitizer?</h2>
+<p>Sanitizers 是由 Google 开源的动态代码分析工具，包括：</p>
+<ul>
+<li>
+<p>AddressSanitizer (ASan)</p>
+</li>
+<li>
+<p>LeakSanitizer (LSan)</p>
+</li>
+<li>
+<p>ThreadSanitizer (TSan)</p>
+</li>
+<li>
+<p>UndefinedBehaviorSanitizer (UBSsan)</p>
+</li>
+<li>
+<p>MemorySanitizer (MSan)</p>
+</li>
+</ul>
+<p>所有的 Sanitizer 都由编译时插桩和运行时库两部分组成，Sanitizer 自 Clang 3.1 和 GCC 4.8 开始被集成在 Clang 和 GCC 中。</p>
+<h2 id="sanitizer-runtime">Sanitizer runtime</h2>
+<p>我们先以 ASan 为例，简单看下 ASan runtime library 做了哪些事情。</p>
+<p>ASan runtime 做的最主要的事情就是替换了 malloc/free, new/delete 的实现。这样应用程序的内存分配都由 ASan 实现的 allocator 来做，就能检测像 heap-use-after-free, double-free 这样的堆错误了。</p>
+<p>程序在启用 ASan 后，virtual address space 会被分成 main application memory 和 shadow memory 两部分：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#75715e">// Typical shadow mapping on Linux/x86_64 with SHADOW_OFFSET == 0x00007fff8000:
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// || `[0x10007fff8000, 0x7fffffffffff]` || HighMem    ||
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// || `[0x02008fff7000, 0x10007fff7fff]` || HighShadow ||
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// || `[0x00008fff7000, 0x02008fff6fff]` || ShadowGap  ||
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// || `[0x00007fff8000, 0x00008fff6fff]` || LowShadow  ||
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// || `[0x000000000000, 0x00007fff7fff]` || LowMem     ||
+</span></span></span></code></pre></div><p>那么 ASan shadow memory 是什么时候初始化的？答：在程序启动之前 sanitizer runtime 初始化时做的。</p>
+<p>另外，在使用 ASan 时，我们可以通过环境变量 ASAN_OPTIONS 来设置一些运行时参数，如：</p>
+<ul>
+<li>
+<p>log_path，指定 sanitizer 的报告输出的位置</p>
+</li>
+<li>
+<p>detect_stack_use_after_return，是否检测 stack-use-after-return 类型的 bug</p>
+</li>
+<li>
+<p>alloc_dealloc_mismatch，是否检测 alloc-dealloc-mismatch 类型的 bug</p>
+</li>
+<li>
+<p>&hellip;</p>
+</li>
+</ul>
+<p>那么这些通过 ASAN_OPTIONS 设置的运行时参数又是在什么时候被解析生效的呢？答：也是在程序启动之前在 sanitizer runtime 初始化时做的。</p>
+<hr>
+<p>ASan runtime 初始化的入口函数是 <code>__asan_init</code>（感兴趣的话，可以仔细阅读下代码，本文不做此做详细的分析了。我这里截取了与 runtime flags 和 shadow memory 初始化相关的函数）。</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#75715e">// compiler-rt/lib/asan/asan_rtl.cpp
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#a6e22e">__asan_init</span>() {
+</span></span><span style="display:flex;"><span>  AsanActivate();
+</span></span><span style="display:flex;"><span>  AsanInitInternal();
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">AsanInitInternal</span>() {
+</span></span><span style="display:flex;"><span>  ...
+</span></span><span style="display:flex;"><span>  <span style="color:#75715e">// Initialize flags. This must be done early, because most of the
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>  <span style="color:#75715e">// initialization steps look at flags().
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>  InitializeFlags();
+</span></span><span style="display:flex;"><span>  ...
+</span></span><span style="display:flex;"><span>  <span style="color:#75715e">// Set up the shadow memory.
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>  InitializeShadowMemory();
+</span></span><span style="display:flex;"><span>  ...
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>那 sanitizer runtime 是怎么做到在程序启动之前执行初始化的相关代码的呢？一言以蔽之： <code>.init_array</code>。下面我们详细看下是怎么实现的。</p>
+<h2 id="instrumentation">Instrumentation</h2>
+<p>首先看下 ASan 插装代码中与 sanitizer runtime 初始化相关的实现。</p>
+<p>ASan 插装部分的代码实现位于 llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp。有如下代码片段（简化并省略部分代码）：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#75715e">// llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">const</span> <span style="color:#66d9ef">char</span> kAsanInitName[] <span style="color:#f92672">=</span> <span style="color:#e6db74">&#34;__asan_init&#34;</span>;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">const</span> <span style="color:#66d9ef">char</span> kAsanModuleCtorName[] <span style="color:#f92672">=</span> <span style="color:#e6db74">&#34;asan.module_ctor&#34;</span>;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">bool</span> ModuleAddressSanitizer<span style="color:#f92672">::</span>instrumentModule(Module <span style="color:#f92672">&amp;</span>M) {
+</span></span><span style="display:flex;"><span>  <span style="color:#75715e">// ...
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>  <span style="color:#75715e">// Create a module constructor.
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>  std<span style="color:#f92672">::</span>string AsanVersion <span style="color:#f92672">=</span> std<span style="color:#f92672">::</span>to_string(GetAsanVersion(M));
+</span></span><span style="display:flex;"><span>  std<span style="color:#f92672">::</span>string VersionCheckName <span style="color:#f92672">=</span>
+</span></span><span style="display:flex;"><span>      ClInsertVersionCheck <span style="color:#f92672">?</span> (kAsanVersionCheckNamePrefix <span style="color:#f92672">+</span> AsanVersion) <span style="color:#f92672">:</span> <span style="color:#e6db74">&#34;&#34;</span>;
+</span></span><span style="display:flex;"><span>  std<span style="color:#f92672">::</span>tie(AsanCtorFunction, std<span style="color:#f92672">::</span>ignore) <span style="color:#f92672">=</span>
+</span></span><span style="display:flex;"><span>      createSanitizerCtorAndInitFunctions(M, kAsanModuleCtorName,
+</span></span><span style="display:flex;"><span>                                            kAsanInitName, <span style="color:#75715e">/*InitArgTypes=*/</span>{},
+</span></span><span style="display:flex;"><span>                                            <span style="color:#75715e">/*InitArgs=*/</span>{}, VersionCheckName);
+</span></span><span style="display:flex;"><span>  <span style="color:#75715e">// ...
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>  <span style="color:#66d9ef">const</span> <span style="color:#66d9ef">uint64_t</span> Priority <span style="color:#f92672">=</span> GetCtorAndDtorPriority(TargetTriple);
+</span></span><span style="display:flex;"><span>  appendToGlobalCtors(M, AsanCtorFunction, Priority);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> true;
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p><code>ModuleAddressSanitizer::instrumentModule(Module &amp;M)</code> 的实现很简单：</p>
+<ol>
+<li>
+<p>先调用 <code>createSanitizerCtorAndInitFunctions</code> 创建了一个名为 <code>kAsanModuleCtorName</code> 的函数，该函数的函数体很简单，就是对 <code>kAsanInitName</code> 函数和 <code>VersionCheckName</code> 函数的调用，其中因为 <code>kAsanInitName</code> 函数没有任何的参数，所以 <code>InitArgTypes</code> 和 <code>InitArgs</code> 都是空。</p>
+</li>
+<li>
+<p>然后通过调用 <code>appendToGlobalCtors</code> 将通过 <code>createSanitizerCtorAndInitFunctions</code> 创建的函数，添加至 GlobalCtors 中。</p>
+</li>
+</ol>
+<p>可能上述描述的还是不够清晰，下面结合一个例子来进一步说明。</p>
+<p>考虑如下代码：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>(<span style="color:#66d9ef">int</span> argc, <span style="color:#66d9ef">char</span> <span style="color:#f92672">**</span>argv) {
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">int</span> <span style="color:#f92672">*</span>array <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> <span style="color:#66d9ef">int</span>[<span style="color:#ae81ff">100</span>];
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">delete</span> [] array;
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> array[argc];  <span style="color:#75715e">// BOOM
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>}
+</span></span></code></pre></div><p>通过 <a href="https://godbolt.org/z/KxesEK3Wf">Compiler Explorer</a> 能很方便看到开启 ASan 后（-fsanitize=address）生成的 LLVM IR 是什么样（这里只截取了部分我们关注的 LLVM IR）：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span>@llvm.global_ctors = <span style="color:#66d9ef">appending</span> <span style="color:#66d9ef">global</span> [<span style="color:#ae81ff">1</span> <span style="color:#66d9ef">x</span> { <span style="color:#66d9ef">i32</span>, <span style="color:#66d9ef">void</span> ()*, <span style="color:#66d9ef">i8</span>* }] [{ <span style="color:#66d9ef">i32</span>, <span style="color:#66d9ef">void</span> ()*, <span style="color:#66d9ef">i8</span>* } { <span style="color:#66d9ef">i32</span> <span style="color:#ae81ff">1</span>, <span style="color:#66d9ef">void</span> ()* @asan.module_ctor, <span style="color:#66d9ef">i8</span>* <span style="color:#66d9ef">null</span> }]
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">declare</span> <span style="color:#66d9ef">void</span> @__asan_init()
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">declare</span> <span style="color:#66d9ef">void</span> @__asan_version_mismatch_check_v8()
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">define</span> <span style="color:#66d9ef">internal</span> <span style="color:#66d9ef">void</span> @asan.module_ctor() {
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">call</span> <span style="color:#66d9ef">void</span> @__asan_init()
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">call</span> <span style="color:#66d9ef">void</span> @__asan_version_mismatch_check_v8()
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">ret</span> <span style="color:#66d9ef">void</span>
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>开启 ASan 后，能明显的看到多了一个函数 <code>asan.module_ctor</code>，多了一个全局变量 <code>@llvm.global_ctors</code>。它们分别由 ASan 插装函数 <code>ModuleAddressSanitizer::instrumentModule(Module &amp;M)</code> 调用 <code>createSanitizerCtorAndInitFunctions</code> 和 <code>appendToGlobalCtors</code> 创建的。</p>
+<p><code>asan.module_ctor</code> 函数体由两个函数调用组成：</p>
+<ul>
+<li>
+<p><code>call void @__asan_init()</code></p>
+</li>
+<li>
+<p><code>call void @__asan_version_mismatch_check_v8()</code></p>
+</li>
+</ul>
+<p>函数 <code>__asan_init</code> 是在 runtime libraray 中实现的，其代码实现我们前面已经给出了；函数 <code>__asan_version_mismatch_check_v8</code> 也是在 runtime libaray 中实现的，顾名思义就是用于检测 asan instrumentation 和 runtime library 的版本是否匹配。</p>
+<p>然后 <code>@llvm.global_ctors</code> 中包含了函数 <code>asan.module_ctor</code> 的指针。</p>
+<p>那么 <code>@llvm.global_ctors</code> 是什么、是怎么实现的？</p>
+<p>根据 <a href="https://llvm.org/docs/LangRef.html#the-llvm-global-ctors-global-variable">https://llvm.org/docs/LangRef.html#the-llvm-global-ctors-global-variable</a> ：</p>
+<blockquote>
+<p>The <code>@llvm.global_ctors</code> array contains a list of constructor functions, priorities, and an associated global or function. The functions referenced by this array will be called in ascending order of priority (i.e. lowest first) when the module is loaded. The order of functions with the same priority is not defined.</p>
+<p>If the third field is non-null, and points to a global variable or function, the initializer function will only run if the associated data from the current module is not discarded. On ELF the referenced global variable or function must be in a comdat.</p>
+</blockquote>
+<p>即 <code>@llvm.global_ctors</code> 是一个数组，包含了一些 constructor functions。这些 constructor functions 会按照 priority 升序在 module 被加载时被调用。</p>
+<p>但是 llvm 文档中并没有说 <code>@llvm.global_ctors</code> 是如何做到 “constructor functions 在 module 被加载时被调用“ 的。</p>
+<h2 id="init_array">.init_array</h2>
+<p>实际上 LLVM IR 中的 <code>@llvm.global_ctors</code> 在生成汇编代码时，对应的是 <code>.init_array</code>。</p>
+<p>我们还是通过前面用到的示例代码来说明：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>(<span style="color:#66d9ef">int</span> argc, <span style="color:#66d9ef">char</span> <span style="color:#f92672">**</span>argv) {
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">int</span> <span style="color:#f92672">*</span>array <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> <span style="color:#66d9ef">int</span>[<span style="color:#ae81ff">100</span>];
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">delete</span> [] array;
+</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> array[argc];  <span style="color:#75715e">// BOOM
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>}
+</span></span></code></pre></div><p>通过 <code>clang++ -fsanitize=address test.cpp -S</code> 可以得到开启 ASan 后生成的汇编代码（我们这里省略了 main 函数的汇编代码）：</p>
+<pre tabindex="0"><code>    .section    .text.asan.module_ctor,&#34;axR&#34;,@progbits
+    .p2align    4, 0x90    # -- Begin function asan.module_ctor
+    .type    asan.module_ctor,@function
+asan.module_ctor:    # @asan.module_ctor
+    pushq    %rbp
+    movq    %rsp, %rbp
+    callq    __asan_init@PLT
+    callq    __asan_version_mismatch_check_v8@PLT
+    popq    %rbp
+    retq
+
+    .section    .init_array.1,&#34;aw&#34;,@init_array
+    .p2align    3
+    .quad    asan.module_ctor
+</code></pre><p>首先是 <code>asan.module_ctor</code> 的汇编实现，没什么特别：就是两条 call 指令，分别对函数 <code>__asan_init</code> 和 <code>__asan_version_mismatch_check_v8</code> 的调用。</p>
+<p>需要注意的是 <code>.init_array.1 section</code>，存储了函数 <code>asan.module_ctor</code> 的指针。<code>.init_array.1</code> 中的 <strong>&quot;.1&quot;</strong> 和 <code>asan.module_ctor</code> 的 priority 有关，因为 <code>{ i32 **1**, void ()* @asan.module_ctor, i8* null }</code> 即 <code>asan.module_ctor</code> 的 priority 是 1，所以这里就是 <code>.init_array.1</code></p>
+<p>关于 <code>.init_array</code>，maskray 的这篇文章写的很详细 <a href="https://maskray.me/blog/2021-11-07-init-ctors-init-array">https://maskray.me/blog/2021-11-07-init-ctors-init-array</a> 。</p>
+<p>在 ELF 文件被 loader 加载后，会先执行 .init_array section 中的函数，再执行 main 函数。这样就达到了在程序启动之前执行 sanitizer runtime 初始化函数的效果。</p>
+<p><img src="/imgs/sanitizer-runtime-init/2022-08-17-20-05-31-image.png" alt=""></p>
+<h2 id="summary">Summary</h2>
+<p>总结一下，sanitizer runtime 是如何做到在程序启动之前进行初始化的，以 ASan 为例：</p>
+<ul>
+<li>
+<p>首先 sanitizer runtime library 中存在一个初始化函数 <code>__asan_init</code>，来做 ASan runtime 的初始化工作，如：初始化 shadow memory、初始化一些运行时参数。</p>
+</li>
+<li>
+<p>然后在开启 ASan ，编译时插装这个阶段，会创建一个名为 <code>asan.module_ctor</code> 的函数，该函数会调用 <code>__asan_init</code>，然后将 <code>asan.module_ctor</code> 的函数指针加入到 <code>@llvm.global_ctors</code> 中。</p>
+</li>
+<li>
+<p>在生成汇编代码时，会将 <code>@llvm.global_ctors</code> 中的函数指针放在 <code>.init_array</code> section 中。</p>
+</li>
+<li>
+<p>最后在 loader 加载 ELF 文件时，会先执行 <code>.init_array</code> 中函数指针指向的函数，然后再执行 <code>main()</code> 函数，这样就做到在程序启动之前初始化 ASan runtime 了。</p>
+</li>
+</ul>
+<h2 id="ps">P.S.</h2>
+<p>C/C++ 面试有一个常见问题就是问如何实现在 <code>main()</code> 函数执行之前，执行一条语句： <a href="https://www.zhihu.com/question/26031933">https://www.zhihu.com/question/26031933</a></p>
+<ul>
+<li>
+<p>一种解决方案是通过 <code>__attribute((constructor))</code> 来修饰相关函数，实现该函数在 <code>main()</code> 函数执行之前被执行。</p>
+</li>
+<li>
+<p>还有一种方案是利用全局变量的构造函数在 <code>main()</code> 函数执行之前执行实现该效果。</p>
+</li>
+</ul>
+<p>实际上述两种方案在汇编的角度来看是一样的，都是通过 <code>.init_array</code> section 来实现的。</p>
+<h2 id="reference">Reference</h2>
+<ol>
+<li>
+<p><a href="http://dbp-consulting.com/tutorials/debugging/linuxProgramStartup.html">http://dbp-consulting.com/tutorials/debugging/linuxProgramStartup.html</a></p>
+</li>
+<li>
+<p><a href="https://maskray.me/blog/2021-11-07-init-ctors-init-array">https://maskray.me/blog/2021-11-07-init-ctors-init-array</a></p>
+</li>
+</ol>
+		</div>
+		<footer class="post__footer">
+			
+<div class="post__tags tags clearfix">
+	<svg class="tags__badge icon icon-tag" width="16" height="16" viewBox="0 0 32 32"><path d="M32 19c0 1-1 2-1 2L21 31s-1 1-2 1-2-1-2-1L2 16c-1-1-1.4-2-1.4-2S0 12.5 0 11V3C0 1.5.8.8.8.8S1.5 0 3 0h8c1.5 0 3 .6 3 .6S15 1 16 2l15 15s1 1 1 2zM7 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/></svg>
+	<ul class="tags__list">
+		<li class="tags__item">
+			<a class="tags__link btn" href="/tags/sanitizer/" rel="tag">Sanitizer</a>
+		</li>
+		<li class="tags__item">
+			<a class="tags__link btn" href="/tags/llvm/" rel="tag">LLVM</a>
+		</li>
+	</ul>
+</div>
+		</footer>
+	</article>
+</main>
+
+
+
+
+			</div>
+			<aside class="sidebar"><div class="widget-search widget">
+	<form class="widget-search__form" role="search" method="get" action="https://google.com/search">
+		<label>
+			<input class="widget-search__field" type="search" placeholder="SEARCH…" value="" name="q" aria-label="SEARCH…">
+		</label>
+		<input class="widget-search__submit" type="submit" value="Search">
+		<input type="hidden" name="sitesearch" value="/">
+	</form>
+</div>
+<div class="widget-recent widget">
+	<h4 class="widget__title">Recent Posts</h4>
+	<div class="widget__content">
+		<ul class="widget__list">
+			<li class="widget__item"><a class="widget__link" href="/post/howsanitizerruntimeinit/">How Sanitizer Runtime Initialized</a></li>
+			<li class="widget__item"><a class="widget__link" href="/post/dumbsanitizerhowto/">How To Write A Dumb Sanitizer</a></li>
+		</ul>
+	</div>
+</div>
+<div class="widget-categories widget">
+	<h4 class="widget__title">Categories</h4>
+	<div class="widget__content">
+		<ul class="widget__list">
+			<li class="widget__item">
+				<a class="widget__link" href="/categories/llvm/">LLVM</a></li>
+			<li class="widget__item">
+				<a class="widget__link" href="/categories/sanitizer/">Sanitizer</a></li>
+		</ul>
+	</div>
+</div>
+<div class="widget-taglist widget">
+	<h4 class="widget__title">Tags</h4>
+	<div class="widget__content">
+		<a class="widget-taglist__link widget__link btn" href="/tags/llvm/" title="LLVM">LLVM</a>
+		<a class="widget-taglist__link widget__link btn" href="/tags/sanitizer/" title="Sanitizer">Sanitizer</a>
+	</div>
+</div>
+<div class="widget-social widget">
+	<h4 class="widget-social__title widget__title">Social</h4>
+	<div class="widget-social__content widget__content">
+		<div class="widget-social__item widget__item">
+			<a class="widget-social__link widget__link btn" title="GitHub" rel="noopener noreferrer" href="https://github.com/Enna1" target="_blank">
+				<svg class="widget-social__link-icon icon icon-github" width="24" height="24" viewBox="0 0 384 374"><path d="m192 0c-106.1 0-192 85.8-192 191.7 0 84.7 55 156.6 131.3 181.9 9.6 1.8 13.1-4.2 13.1-9.2 0-4.6-.2-16.6-.3-32.6-53.4 11.6-64.7-25.7-64.7-25.7-8.7-22.1-21.3-28-21.3-28-17.4-11.9 1.3-11.6 1.3-11.6 19.3 1.4 29.4 19.8 29.4 19.8 17.1 29.3 44.9 20.8 55.9 15.9 1.7-12.4 6.7-20.8 12.2-25.6-42.6-4.8-87.5-21.3-87.5-94.8 0-20.9 7.5-38 19.8-51.4-2-4.9-8.6-24.3 1.9-50.7 0 0 16.1-5.2 52.8 19.7 15.3-4.2 31.7-6.4 48.1-6.5 16.3.1 32.7 2.2 48.1 6.5 36.7-24.8 52.8-19.7 52.8-19.7 10.5 26.4 3.9 45.9 1.9 50.7 12.3 13.4 19.7 30.5 19.7 51.4 0 73.7-44.9 89.9-87.7 94.6 6.9 5.9 13 17.6 13 35.5 0 25.6-.2 46.3-.2 52.6 0 5.1 3.5 11.1 13.2 9.2 76.2-25.5 131.2-97.3 131.2-182 0-105.9-86-191.7-192-191.7z"/></svg>
+				<span>GitHub</span>
+			</a>
+		</div>
+		<div class="widget-social__item widget__item">
+			<a class="widget-social__link widget__link btn" title="Email" href="mailto:xumingjie.enna1@bytedance.com">
+				<svg class="widget-social__link-icon icon icon-mail" width="24" height="24" viewBox="0 0 416 288"><path d="m0 16v256 16h16 384 16v-16-256-16h-16-384-16zm347 16-139 92.5-139-92.5zm-148 125.5 9 5.5 9-5.5 167-111.5v210h-352v-210z"/></svg>
+				<span>xumingjie.enna1@bytedance.com</span>
+			</a>
+		</div>
+
+		
+		<div class="widget-social__item widget__item">
+			<a class="widget-social__link widget__link btn" title="Blog RSS" rel="noopener noreferrer" href="/post/index.xml" target="_blank">
+					<svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328 0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765 0 183.105 0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686 0 38.981 0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg>
+				<span>Blog RSS</span>
+			</a>
+		</div>
+		
+		<div class="widget-social__item widget__item">
+			<a class="widget-social__link widget__link btn" title="Podcast RSS" rel="noopener noreferrer" href="/podcast/index.xml" target="_blank">
+					<svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328 0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765 0 183.105 0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686 0 38.981 0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg>
+				<span>Podcast RSS</span>
+			</a>
+		</div>
+		
+	</div>
+</div>
+</aside>
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2022 Enna1.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>
