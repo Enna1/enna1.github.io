@@ -2,18 +2,18 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>LLVM  Enna1&#39;s blog</title>
-    <link>/categories/llvm/</link>
+    <link>https://enna1.github.io/categories/llvm/</link>
     <description>  LLVM  Enna1&#39;s blog</description>
     <generator>Hugo -- gohugo.io</generator>
     <language>en-us</language>
     <lastBuildDate>Wed, 17 Aug 2022 00:00:00 +0000</lastBuildDate>
-    <atom:link href="/categories/llvm/index.xml" rel="self" type="application/rss+xml" />
+    <atom:link href="https://enna1.github.io/categories/llvm/index.xml" rel="self" type="application/rss+xml" />
     
     <item>
       <title>How Sanitizer Runtime Initialized</title>
-      <link>/post/howsanitizerruntimeinit/</link>
+      <link>https://enna1.github.io/post/howsanitizerruntimeinit/</link>
       <pubDate>Wed, 17 Aug 2022 00:00:00 +0000</pubDate>
-      <guid>/post/howsanitizerruntimeinit/</guid>
+      <guid>https://enna1.github.io/post/howsanitizerruntimeinit/</guid>
       <description>&lt;p&gt;本文分析了 sanitizer runtime 是如何做到在程序启动之前进行初始化的。&lt;/p&gt;
 &lt;h2 id=&#34;what-is-a-sanitizer&#34;&gt;What is a sanitizer?&lt;/h2&gt;
 &lt;p&gt;Sanitizers 是由 Google 开源的动态代码分析工具，包括：&lt;/p&gt;
@@ -181,7 +181,7 @@ asan.module_ctor:    # @asan.module_ctor
 &lt;p&gt;需要注意的是 &lt;code&gt;.init_array.1 section&lt;/code&gt;，存储了函数 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的指针。&lt;code&gt;.init_array.1&lt;/code&gt; 中的 &lt;strong&gt;&amp;quot;.1&amp;quot;&lt;/strong&gt; 和 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的 priority 有关，因为 &lt;code&gt;{ i32 **1**, void ()* @asan.module_ctor, i8* null }&lt;/code&gt; 即 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的 priority 是 1，所以这里就是 &lt;code&gt;.init_array.1&lt;/code&gt;&lt;/p&gt;
 &lt;p&gt;关于 &lt;code&gt;.init_array&lt;/code&gt;，maskray 的这篇文章写的很详细 &lt;a href=&#34;https://maskray.me/blog/2021-11-07-init-ctors-init-array&#34;&gt;https://maskray.me/blog/2021-11-07-init-ctors-init-array&lt;/a&gt; 。&lt;/p&gt;
 &lt;p&gt;在 ELF 文件被 loader 加载后，会先执行 .init_array section 中的函数，再执行 main 函数。这样就达到了在程序启动之前执行 sanitizer runtime 初始化函数的效果。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&#34;/imgs/sanitizer-runtime-init/2022-08-17-20-05-31-image.png&#34; alt=&#34;&#34;&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&#34;https://enna1.github.io/blog/sanitizer-runtime-init/2022-08-17-20-05-31-image.png&#34; alt=&#34;&#34;&gt;&lt;/p&gt;
 &lt;h2 id=&#34;summary&#34;&gt;Summary&lt;/h2&gt;
 &lt;p&gt;总结一下，sanitizer runtime 是如何做到在程序启动之前进行初始化的，以 ASan 为例：&lt;/p&gt;
 &lt;ul&gt;
@@ -222,9 +222,9 @@ asan.module_ctor:    # @asan.module_ctor
     
     <item>
       <title>How To Write A Dumb Sanitizer</title>
-      <link>/post/dumbsanitizerhowto/</link>
+      <link>https://enna1.github.io/post/dumbsanitizerhowto/</link>
       <pubDate>Thu, 02 Jun 2022 00:00:00 +0000</pubDate>
-      <guid>/post/dumbsanitizerhowto/</guid>
+      <guid>https://enna1.github.io/post/dumbsanitizerhowto/</guid>
       <description>&lt;p&gt;本文描述了如何实现一个简单的 sanitizer 。&lt;/p&gt;
 &lt;p&gt;本文所实现的 DumbSanitizer 的完整代码见 &lt;a href=&#34;https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16&#34;&gt;DumbSanitizer.patch · GitHub&lt;/a&gt;，基于 llvm 14.0.4。&lt;/p&gt;
 &lt;h2 id=&#34;introduction--what-is-a-sanitizer&#34;&gt;Introduction — What is a sanitizer?&lt;/h2&gt;

@@ -2,18 +2,18 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>Enna1&#39;s blog</title>
-    <link>/</link>
+    <link>https://enna1.github.io/</link>
     <description>  Enna1&#39;s blog</description>
     <generator>Hugo -- gohugo.io</generator>
     <language>en-us</language>
     <lastBuildDate>Wed, 17 Aug 2022 00:00:00 +0000</lastBuildDate>
-    <atom:link href="/index.xml" rel="self" type="application/rss+xml" />
+    <atom:link href="https://enna1.github.io/index.xml" rel="self" type="application/rss+xml" />
     
     <item>
       <title>How Sanitizer Runtime Initialized</title>
-      <link>/post/howsanitizerruntimeinit/</link>
+      <link>https://enna1.github.io/post/howsanitizerruntimeinit/</link>
       <pubDate>Wed, 17 Aug 2022 00:00:00 +0000</pubDate>
-      <guid>/post/howsanitizerruntimeinit/</guid>
+      <guid>https://enna1.github.io/post/howsanitizerruntimeinit/</guid>
       <description>&lt;p&gt;本文分析了 sanitizer runtime 是如何做到在程序启动之前进行初始化的。&lt;/p&gt;
 &lt;h2 id=&#34;what-is-a-sanitizer&#34;&gt;What is a sanitizer?&lt;/h2&gt;
 &lt;p&gt;Sanitizers 是由 Google 开源的动态代码分析工具，包括：&lt;/p&gt;
@@ -181,7 +181,7 @@ asan.module_ctor:    # @asan.module_ctor
 &lt;p&gt;需要注意的是 &lt;code&gt;.init_array.1 section&lt;/code&gt;，存储了函数 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的指针。&lt;code&gt;.init_array.1&lt;/code&gt; 中的 &lt;strong&gt;&amp;quot;.1&amp;quot;&lt;/strong&gt; 和 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的 priority 有关，因为 &lt;code&gt;{ i32 **1**, void ()* @asan.module_ctor, i8* null }&lt;/code&gt; 即 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的 priority 是 1，所以这里就是 &lt;code&gt;.init_array.1&lt;/code&gt;&lt;/p&gt;
 &lt;p&gt;关于 &lt;code&gt;.init_array&lt;/code&gt;，maskray 的这篇文章写的很详细 &lt;a href=&#34;https://maskray.me/blog/2021-11-07-init-ctors-init-array&#34;&gt;https://maskray.me/blog/2021-11-07-init-ctors-init-array&lt;/a&gt; 。&lt;/p&gt;
 &lt;p&gt;在 ELF 文件被 loader 加载后，会先执行 .init_array section 中的函数，再执行 main 函数。这样就达到了在程序启动之前执行 sanitizer runtime 初始化函数的效果。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&#34;/imgs/sanitizer-runtime-init/2022-08-17-20-05-31-image.png&#34; alt=&#34;&#34;&gt;&lt;/p&gt;
+&lt;p&gt;&lt;img src=&#34;https://enna1.github.io/blog/sanitizer-runtime-init/2022-08-17-20-05-31-image.png&#34; alt=&#34;&#34;&gt;&lt;/p&gt;
 &lt;h2 id=&#34;summary&#34;&gt;Summary&lt;/h2&gt;
 &lt;p&gt;总结一下，sanitizer runtime 是如何做到在程序启动之前进行初始化的，以 ASan 为例：&lt;/p&gt;
 &lt;ul&gt;
@@ -221,12 +221,81 @@ asan.module_ctor:    # @asan.module_ctor
     </item>
     
     <item>
+      <title>Ep 2. 你好，我的博士生活</title>
+      <link>https://enna1.github.io/podcast/episod-2/</link>
+      <pubDate>Sat, 13 Aug 2022 00:00:00 +0000</pubDate>
+      <guid>https://enna1.github.io/podcast/episod-2/</guid>
+      <description>&lt;p&gt;这一期我们要一起聊一聊博士生活中的那些事。&lt;/p&gt;
+&lt;hr&gt;
+&lt;h2 id=&#34;聊一聊博士生活中的那些事&#34;&gt;聊一聊博士生活中的那些事&lt;/h2&gt;
+&lt;blockquote&gt;
+&lt;p&gt;本期嘉宾：@辣辣 @了安兰&lt;/p&gt;
+&lt;p&gt;本期主播：@罗杰 @余扬&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;时间轴&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;00:00-16:51
+两位生物领域博士的自我介绍：“合成生物学”与“生物信息学”；&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;16:51-25:08
+选择生物学的原因，以及决定读博的那些契机；&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;25:08-37:30
+关于一些“谣言”：“博士毕业好难啊”以及“生化环材”四大天坑；&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;37:30-50:55
+一个博士生的一天；&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;50:55-61:38
+读博中的打工时刻：你的“工资”是多少；&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;61:38-88:10
+论成功毕业：毕业要求，以及对未来的规划；&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;87:45-92:16
+余扬的私心问题：如何面对生活中的那些重要转折点&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;92:16-97:28
+本期的好物推荐环节；&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;h2 id=&#34;推荐环节&#34;&gt;推荐环节&lt;/h2&gt;
+&lt;p&gt;下面进入我们播客的保留环节~&lt;/p&gt;
+&lt;p&gt;每一期我们的主播和嘉宾都会推荐一个自己喜欢的“内容”，它可以是一本书，也可以是一个电影、一个游戏，只要是大家想要推荐的东西。本期，我们一共推荐了以下四个“内容”：&lt;/p&gt;
+&lt;p&gt;@罗杰 | 《The Ph.D. Grind》&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;“推荐给所有读博并且打算读博的人，斯坦福大学一个计算机系博士自己的读博经历，讲述了他在读博期间的机遇和挑战，即使对于工作的人来讲这本书也非常有意义。”&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;@余扬 | 《献给阿尔吉侬的花束》&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;“一个先天智商缺陷的‘傻瓜‘通过科学实验，短暂的变成了一个天才，又变回‘傻瓜’的故事；在这场巨大的转变中，除了他智商的迅速改变，还给他的内心带来了巨大的冲击。一本比科幻本身更注重人性的科幻小说，推荐给大家。”&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;@辣辣 | 《父母爱情》、《觉醒年代》&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;“《觉醒年代》带给人的感觉非常震撼，即使具体的剧情内容已经逐渐忘记了，但带给你的思考是无法忘记的；《父母爱情》常看常新、百看不厌的经典老剧，吃饭做实验以及加班时陪伴你的最强剧集之一。”&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;@了安兰 | 《生活大爆炸》&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;“工作时调剂心情的最好陪伴之一，整个系列都很好看，笑一笑的同时还可以学习英语（认真的。”&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;以上，就是本期的全部内容，我们下期再见&lt;/p&gt;</description>
+    </item>
+    
+    <item>
       <title>Ep 1. 聊聊大学、研究生和工作生活</title>
-      <link>/podcast/episod-1/</link>
+      <link>https://enna1.github.io/podcast/episod-1/</link>
       <pubDate>Mon, 11 Jul 2022 00:00:00 +0000</pubDate>
-      <guid>/podcast/episod-1/</guid>
-      <description>&lt;p&gt;你好，欢迎来到「徐徐道来」，这是小罗小余和他们的朋友们一起聊天的节目，欢迎你的收听~&lt;/p&gt;
-&lt;p&gt;这一期我们要一起聊聊上学和工作的那些事。&lt;/p&gt;
+      <guid>https://enna1.github.io/podcast/episod-1/</guid>
+      <description>&lt;p&gt;这一期我们要一起聊聊上学和工作的那些事。&lt;/p&gt;
 &lt;hr&gt;
 &lt;h2 id=&#34;聊聊上学和工作的那些事&#34;&gt;聊聊上学和工作的那些事&lt;/h2&gt;
 &lt;blockquote&gt;
@@ -263,9 +332,9 @@ asan.module_ctor:    # @asan.module_ctor
     
     <item>
       <title>How To Write A Dumb Sanitizer</title>
-      <link>/post/dumbsanitizerhowto/</link>
+      <link>https://enna1.github.io/post/dumbsanitizerhowto/</link>
       <pubDate>Thu, 02 Jun 2022 00:00:00 +0000</pubDate>
-      <guid>/post/dumbsanitizerhowto/</guid>
+      <guid>https://enna1.github.io/post/dumbsanitizerhowto/</guid>
       <description>&lt;p&gt;本文描述了如何实现一个简单的 sanitizer 。&lt;/p&gt;
 &lt;p&gt;本文所实现的 DumbSanitizer 的完整代码见 &lt;a href=&#34;https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16&#34;&gt;DumbSanitizer.patch · GitHub&lt;/a&gt;，基于 llvm 14.0.4。&lt;/p&gt;
 &lt;h2 id=&#34;introduction--what-is-a-sanitizer&#34;&gt;Introduction — What is a sanitizer?&lt;/h2&gt;
@@ -571,17 +640,17 @@ address of `i` is 0x7fff58173968
     
     <item>
       <title>Archives</title>
-      <link>/archives/</link>
+      <link>https://enna1.github.io/archives/</link>
       <pubDate>Fri, 26 Jun 2020 23:35:07 +0800</pubDate>
-      <guid>/archives/</guid>
+      <guid>https://enna1.github.io/archives/</guid>
       <description></description>
     </item>
     
     <item>
       <title>About</title>
-      <link>/about/</link>
+      <link>https://enna1.github.io/about/</link>
       <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
-      <guid>/about/</guid>
+      <guid>https://enna1.github.io/about/</guid>
       <description>&lt;ul&gt;
 &lt;li&gt;Software Engineer at ByteDance&lt;/li&gt;
 &lt;li&gt;Compiler based Program Analysis and Optimization&lt;/li&gt;
