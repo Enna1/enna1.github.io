@@ -2,13 +2,19 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
   xmlns:xhtml="http://www.w3.org/1999/xhtml">
   <url>
+    <loc>https://enna1.github.io/</loc>
+    <lastmod>2022-09-24T00:00:00+00:00</lastmod>
+  </url><url>
+    <loc>https://enna1.github.io/podcast/episod-3/</loc>
+    <lastmod>2022-09-24T00:00:00+00:00</lastmod>
+  </url><url>
+    <loc>https://enna1.github.io/podcast/</loc>
+    <lastmod>2022-09-24T00:00:00+00:00</lastmod>
+  </url><url>
     <loc>https://enna1.github.io/post/</loc>
     <lastmod>2022-08-17T00:00:00+00:00</lastmod>
   </url><url>
     <loc>https://enna1.github.io/categories/</loc>
-    <lastmod>2022-08-17T00:00:00+00:00</lastmod>
-  </url><url>
-    <loc>https://enna1.github.io/</loc>
     <lastmod>2022-08-17T00:00:00+00:00</lastmod>
   </url><url>
     <loc>https://enna1.github.io/post/howsanitizerruntimeinit/</loc>
@@ -30,9 +36,6 @@
     <lastmod>2022-08-17T00:00:00+00:00</lastmod>
   </url><url>
     <loc>https://enna1.github.io/podcast/episod-2/</loc>
-    <lastmod>2022-08-13T00:00:00+00:00</lastmod>
-  </url><url>
-    <loc>https://enna1.github.io/podcast/</loc>
     <lastmod>2022-08-13T00:00:00+00:00</lastmod>
   </url><url>
     <loc>https://enna1.github.io/podcast/episod-1/</loc>
