@@ -6,8 +6,355 @@
     <description>  Blog section  Enna1&#39;s blog</description>
     <generator>Hugo -- gohugo.io</generator>
     <language>en-us</language>
-    <lastBuildDate>Wed, 17 Aug 2022 00:00:00 +0000</lastBuildDate>
+    <lastBuildDate>Sun, 18 Sep 2022 00:00:00 +0000</lastBuildDate>
     <atom:link href="https://enna1.github.io/post/index.xml" rel="self" type="application/rss+xml" />
+    
+    <item>
+      <title>How Sanitizer Interceptor Works</title>
+      <link>https://enna1.github.io/post/howsanitizerinterceptorworks/</link>
+      <pubDate>Sun, 18 Sep 2022 00:00:00 +0000</pubDate>
+      <guid>https://enna1.github.io/post/howsanitizerinterceptorworks/</guid>
+      <description>&lt;p&gt;本文分析了 sanitizer 是如何做到替换 malloc, free, memcpy 这些库函数的实现的。即 sanitizer 中的 interceptor 机制。&lt;/p&gt;
+&lt;p&gt;我们在前面的文章中提到，所有的 Sanitizer 都由编译时插桩 (compile-time instrumentation) 和运行时库 (run-time library) 两部分组成。&lt;/p&gt;
+&lt;p&gt;那么 sanitizer 的运行时库中做了哪些事情呢？&lt;/p&gt;
+&lt;p&gt;以 ASan 为例：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;ASan 编译时会在每一处内存读写语句之前插入代码，根据每一次访问的内存所对应的影子内存 ( shadow memory，就是使用额外的内存记录常规内存的状态）的状态来检测本次内存访问是否合法。还会在栈变量和全局变量附近申请额外内存作为危险区用于检测内存溢出。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;ASan 运行时库中最主要的就是替换了 malloc/free, new/delete 的实现，这样应用程序的内存分配都由 ASan 实现的内存分配器负责。ASan 内存分配器会在它分配的堆内存附近申请额外内存用于检测堆内存溢出，还会将被释放的内存优先放在隔离区 (quarantine) 用于检测像 heap-use-after-free, double-free 这样的堆内存错误。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;ASan 运行时库中实际上不止替换了 malloc/free, new/delete 的函数实现，还替换了非常多的库函数的实现，如：memcpy, memmove, strcpy, strcat, pthread_create 等。&lt;/p&gt;
+&lt;p&gt;那么 sanitizer 是如何做到替换 malloc, free, memcpy 这些函数实现的呢？答案就是 sanitizer 中的 interceptor 机制。&lt;/p&gt;
+&lt;p&gt;本文以 ASan 为例，分析在 Linux x86_64 环境下 sanitizer interceptor 的实现原理。&lt;/p&gt;
+&lt;h2 id=&#34;symbol-interposition&#34;&gt;Symbol interposition&lt;/h2&gt;
+&lt;p&gt;在讲解 sanitizer interceptor 的实现原理之前，我们先来了解一下前置知识：symbol interposition。&lt;/p&gt;
+&lt;p&gt;首先我们考虑这样一个问题：如何在我们的应用程序中替换 libc 的 malloc 实现为我们自己实现的版本？&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;
+&lt;p&gt;一个最简单的方式就是在我们的应用程序中定义一个同名的 malloc 函数&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;还有一种方式就是将我们的 malloc 函数实现在 libmymalloc.so 中，然后在运行我们的应用程序之前设置环境变量 &lt;code&gt;LD_PRELOAD=/path/to/libmymalloc.so&lt;/code&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;那么为什么上述两种方式能生效呢？答案是 symbol interposition。&lt;/p&gt;
+&lt;p&gt;&lt;a href=&#34;http://www.sco.com/developers/gabi/latest/contents.html&#34;&gt;ELF specfication&lt;/a&gt; 在第五章 Program Loading and Dynamic Linking 中提到：&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;When resolving symbolic references, the dynamic linker examines the symbol tables with a breadth-first search. That is, it first looks at the symbol table of the executable program itself, then at the symbol tables of the &lt;code&gt;DT_NEEDED&lt;/code&gt; entries (in order), and then at the second level &lt;code&gt;DT_NEEDED&lt;/code&gt; entries, and so on.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;动态链接器 (dynamic linker/loader) 在符号引用绑定 (binding symbol references) 时，以一种广度优先搜索的顺序来查找符号：executable, needed0.so, needed1.so, needed2.so, needed0_of_needed0.so, needed1_of_needed0.so, &amp;hellip;&lt;/p&gt;
+&lt;p&gt;如果设置了 LD_PRELOAD，那么查找符号的顺序会变为：executable, preload0.so, preload1.so needed0.so, needed1.so, needed2.so, needed0_of_needed0.so, needed1_of_needed0.so, &amp;hellip;&lt;/p&gt;
+&lt;p&gt;如果一个符号在多个组件（executable 或 shared object）中都存在定义，那么动态链接器会选择它所看到的第一个定义。&lt;/p&gt;
+&lt;p&gt;我们通过一个例子来理解该过程：&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; cat main.c
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; W(), X();
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;main&lt;/span&gt;() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (W() &lt;span style=&#34;color:#f92672&#34;&gt;+&lt;/span&gt; X()); }
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; cat W.c
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; b();
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;a&lt;/span&gt;() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (&lt;span style=&#34;color:#ae81ff&#34;&gt;1&lt;/span&gt;); }
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;W&lt;/span&gt;() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (a() &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt; b()); }
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; cat w.c
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; b() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (&lt;span style=&#34;color:#ae81ff&#34;&gt;2&lt;/span&gt;); }
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; cat X.c
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; b();
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;a&lt;/span&gt;() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (&lt;span style=&#34;color:#ae81ff&#34;&gt;3&lt;/span&gt;); }
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;X&lt;/span&gt;() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (a() &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt; b()); }
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; cat x.c
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; b() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (&lt;span style=&#34;color:#ae81ff&#34;&gt;4&lt;/span&gt;); }
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; gcc &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;o libw.so &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;shared w.c
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; gcc &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;o libW.so &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;shared W.c &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;L. &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;lw &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;Wl,&lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;rpath&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;.
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; gcc &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;o libx.so &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;shared x.c
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; gcc &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;o libX.so &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;shared X.c &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;L. &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;lx &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;Wl,&lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;rpath&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;.
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; gcc &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;o test&lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;symbind main.c &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;L. &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;lW &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;lX &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;Wl,&lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;rpath&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;.
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;该例子中可执行文件与动态库之间的依赖关系如下图所示：&lt;/p&gt;
+&lt;p&gt;&lt;img src=&#34;https://enna1.github.io/blog/sanitizer-interceptor/2022-10-02-20-18-44-image.png&#34; alt=&#34;&#34;&gt;&lt;/p&gt;
+&lt;p&gt;按照我们前面所说，本例中动态链接器在进行符号引用绑定时，是按照广度优先搜索的顺序，即：test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的。&lt;/p&gt;
+&lt;p&gt;动态链接器提供了环境变量 LD_DEBUG 来输出一些调试信息，我们可以通过设置环境变量 LD_DEBUG=&amp;ldquo;symbols:bindings&amp;rdquo; 看下 test-symbind 的 symbol binding 的过程：&lt;/p&gt;
+&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;$ LD_DEBUG=&amp;#34;symbols:bindings&amp;#34; ./test-symbind
+   1884890:        symbol=a;  lookup in file=./test-symbind [0]
+   1884890:        symbol=a;  lookup in file=./libW.so [0]
+   1884890:        binding file ./libW.so [0] to ./libW.so [0]: normal symbol `a&amp;#39;
+   1884890:        symbol=b;  lookup in file=./test-symbind [0]
+   1884890:        symbol=b;  lookup in file=./libW.so [0]
+   1884890:        symbol=b;  lookup in file=./libX.so [0]
+   1884890:        symbol=b;  lookup in file=/lib/x86_64-linux-gnu/libc.so.6 [0]
+   1884890:        symbol=b;  lookup in file=./libw.so [0]
+   1884890:        binding file ./libW.so [0] to ./libw.so [0]: normal symbol `b&amp;#39;
+   1884890:        symbol=a;  lookup in file=./test-symbind [0]
+   1884890:        symbol=a;  lookup in file=./libW.so [0]
+   1884890:        binding file ./libX.so [0] to ./libW.so [0]: normal symbol `a&amp;#39;
+   1884890:        symbol=b;  lookup in file=./test-symbind [0]
+   1884890:        symbol=b;  lookup in file=./libW.so [0]
+   1884890:        symbol=b;  lookup in file=./libX.so [0]
+   1884890:        symbol=b;  lookup in file=/lib/x86_64-linux-gnu/libc.so.6 [0]
+   1884890:        symbol=b;  lookup in file=./libw.so [0]
+   1884890:        binding file ./libX.so [0] to ./libw.so [0]: normal symbol `b&amp;#39;
+&lt;/code&gt;&lt;/pre&gt;&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;函数 a 在 libW.so 和 libX.so 中都有一份定义，但因为是按照 test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的，所以最终所有对函数 a 的引用都绑定到 libW.so 中函数 a 的实现&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;函数 b 在 libw.so 和 libx.so 中都有一份定义，但因为是按照 test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的，所以最终所有对函数 b 的引用都绑定到 libw.so 中函数 b 的实现&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;p&gt;这样我们就理解为什么上述两种替换 malloc 的方式能生效了：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;方式一：在我们的应用程序中定义一个同名的 malloc 函数。动态链接器在查找符号时 executable 的顺序在 libc.so 之前，因此所有对 malloc 的引用都会绑定到 executable 中 malloc 的实现。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;方式二：将我们的 malloc 函数实现在 libmymalloc.so 中，然后在运行我们的应用程序之前设置环境变量 LD_PRELOAD=/path/to/libmymalloc.so。动态链接器在查找符号时 libmymalloc.so 的顺序在 libc.so 之前，因此所有对 malloc 的引用都会绑定到 libmymalloc.so 中 malloc 的实现。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;p&gt;实际上 sanitizer 对于 malloc/free 等库函数的替换正是利用了 symbol interposition 这一特性。下面我们以 ASan 为例来验证一下。&lt;/p&gt;
+&lt;p&gt;考虑如下代码：&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// test.cpp
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;#include&lt;/span&gt; &lt;span style=&#34;color:#75715e&#34;&gt;&amp;lt;iostream&amp;gt;&lt;/span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;main&lt;/span&gt;() {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    std&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;cout &lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;Hello AddressSanitizer!&lt;/span&gt;&lt;span style=&#34;color:#ae81ff&#34;&gt;\n&lt;/span&gt;&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;&lt;/span&gt;;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;我们首先看下 GCC 的行为。&lt;/p&gt;
+&lt;p&gt;使用 GCC 开启 ASan 编译 test.cpp ，&lt;code&gt;g++ -fsanitize=address test.cpp -o test-gcc-asan&lt;/code&gt; 得到编译产物 test-gcc-asan。因为 GCC 默认会&lt;strong&gt;动态链接&lt;/strong&gt; ASan 运行时库，所以我们可以使用 &lt;code&gt;objdump -p test-gcc-asan | grep NEEDED&lt;/code&gt; 查看 test-gcc-asan 依赖的动态库 (shared objects)：&lt;/p&gt;
+&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;$ objdump -p test-gcc-asan | grep NEEDED
+  NEEDED               libasan.so.5
+  NEEDED               libstdc++.so.6
+  NEEDED               libm.so.6
+  NEEDED               libgcc_s.so.1
+  NEEDED               libc.so.6
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;可以清楚的看到在 test-gcc-asan 依赖的动态库中 libasan.so 的顺序是在 libc.so 之前的。实际上链接时参数 &lt;code&gt;-fsanitize=address&lt;/code&gt; 会使得 libasan.so 成为程序的第一个依赖库。&lt;/p&gt;
+&lt;p&gt;然后我们再通过环境变量 LD_DEBUG 看下 test-gcc-asan 的 symbol bindding 的过程：&lt;/p&gt;
+&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;$ LD_DEBUG=&amp;#34;bindings&amp;#34; ./test-gcc-asan
+   3309213:        binding file /lib/x86_64-linux-gnu/libc.so.6 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+   3309213:        binding file /lib64/ld-linux-x86-64.so.2 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+   3309213:        binding file /usr/lib/x86_64-linux-gnu/libstdc++.so.6 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;可以看到动态链接器将 libc.so, ld-linux-x86-64.so 和 libstdc++.so 中对 malloc 的引用都绑定到了 libasan.so 中的 malloc 实现。&lt;/p&gt;
+&lt;hr&gt;
+&lt;p&gt;下面我们看下 Clang，因为 Clang 默认是&lt;strong&gt;静态链接&lt;/strong&gt; ASan 运行时库，所以我们就不看 test-clang-asan 所依赖的动态库了，直接看 symbol binding 的过程：&lt;/p&gt;
+&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;$ clang++ -fsanitize=address test.cpp -o test-clang-asan
+$ LD_DEBUG=&amp;#34;bindings&amp;#34; ./test-clang-asan
+   3313022:        binding file /lib/x86_64-linux-gnu/libc.so.6 [0] to ./test-clang-asan [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+   3313022:        binding file /lib64/ld-linux-x86-64.so.2 [0] to ./test-clang-asan [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+   3313022:        binding file /usr/lib/x86_64-linux-gnu/libstdc++.so.6 [0] to ./test-clang-asan [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;同样可以看到动态链接器将 libc.so, ld-linux-x86-64.so.2 和 libstdc++.so 中对 malloc 的引用都绑定到了 test-clang-asan 中的 malloc 实现（因为 ASan 运行时库 中实现了 malloc，并且 clang 将 ASan 运行时库静态链接到 test-clang-asan 中）。&lt;/p&gt;
+&lt;h2 id=&#34;sanitizer-interceptor&#34;&gt;Sanitizer interceptor&lt;/h2&gt;
+&lt;p&gt;下面我们来在源码的角度，学习下 sanitizer interceptor 的实现。&lt;/p&gt;
+&lt;p&gt;阅读学习 LLVM 代码的一个非常有效的方式就是结合对应的测试代码来学习。&lt;/p&gt;
+&lt;p&gt;Sanitizer interceptor 存在一个测试文件 interception_linux_test.cpp，&lt;a href=&#34;https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/tests/interception_linux_test.cpp&#34;&gt;llvm-project/interception_linux_test.cpp at main · llvm/llvm-project · GitHub&lt;/a&gt;&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;#include&lt;/span&gt; &lt;span style=&#34;color:#75715e&#34;&gt;&amp;#34;interception/interception.h&amp;#34;&lt;/span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;#include&lt;/span&gt; &lt;span style=&#34;color:#75715e&#34;&gt;&amp;#34;gtest/gtest.h&amp;#34;&lt;/span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;static&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; InterceptorFunctionCalled;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;DECLARE_REAL(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;, isdigit, &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;INTERCEPTOR(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;, isdigit, &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d) {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#f92672&#34;&gt;++&lt;/span&gt;InterceptorFunctionCalled;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;0&amp;#39;&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&amp;amp;&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;9&amp;#39;&lt;/span&gt;;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;namespace&lt;/span&gt; __interception {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;TEST(Interception, Basic) {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_TRUE(INTERCEPT_FUNCTION(isdigit));
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#75715e&#34;&gt;// After interception, the counter should be incremented.
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;  InterceptorFunctionCalled &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_NE(&lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;, isdigit(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;1&amp;#39;&lt;/span&gt;));
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_EQ(&lt;span style=&#34;color:#ae81ff&#34;&gt;1&lt;/span&gt;, InterceptorFunctionCalled);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_EQ(&lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;, isdigit(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;a&amp;#39;&lt;/span&gt;));
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_EQ(&lt;span style=&#34;color:#ae81ff&#34;&gt;2&lt;/span&gt;, InterceptorFunctionCalled);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#75715e&#34;&gt;// Calling the REAL function should not affect the counter.
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;  InterceptorFunctionCalled &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_NE(&lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;, REAL(isdigit)(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;1&amp;#39;&lt;/span&gt;));
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_EQ(&lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;, REAL(isdigit)(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;a&amp;#39;&lt;/span&gt;));
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_EQ(&lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;, InterceptorFunctionCalled);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}  &lt;span style=&#34;color:#75715e&#34;&gt;// namespace __interception
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;这段测试代码基于 sanitizer 的 interceptor 机制替换了 &lt;code&gt;isdigit&lt;/code&gt; 函数的实现，在我们实现的 &lt;code&gt;isdigit&lt;/code&gt; 函数中，每次 &lt;code&gt;isdigit&lt;/code&gt; 函数被调用时都将变量 &lt;code&gt;InterceptorFunctionCalled&lt;/code&gt; 自增 1。然后通过检验变量 &lt;code&gt;InterceptorFunctionCalled&lt;/code&gt; 的值来测试 interceptor 机制的实现是否正确，通过 &lt;code&gt;REAL(isdigit)&lt;/code&gt; 来调用真正的 &lt;code&gt;isdigit&lt;/code&gt; 函数实现。&lt;/p&gt;
+&lt;p&gt;上述测试文件 interception_linux_test.cpp 中实现替换 &lt;code&gt;isdigit&lt;/code&gt; 函数的核心部分是如下代码片段：&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;INTERCEPTOR(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;, isdigit, &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d) {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#f92672&#34;&gt;++&lt;/span&gt;InterceptorFunctionCalled;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;0&amp;#39;&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&amp;amp;&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;9&amp;#39;&lt;/span&gt;;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;INTERCEPT_FUNCTION(isdigit);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;DECLARE_REAL(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;, isdigit, &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;REAL(isdigit)(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;1&amp;#39;&lt;/span&gt;);
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;code&gt;INTERCEPTOR(int, isdigit, int d) { ... }&lt;/code&gt; 用于将函数 &lt;code&gt;isdigit&lt;/code&gt; 的实现替换为 { &amp;hellip; } 的实现&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;在代码中调用 &lt;code&gt;isdigit&lt;/code&gt; 之前，需要先调用 &lt;code&gt;INTERCEPT_FUNCTION(isdigit)&lt;/code&gt;。如果 &lt;code&gt;INTERCEPT_FUNCTION(isdigit)&lt;/code&gt; 返回为 true，则说明成功替换了将 libc 中 &lt;code&gt;isdigit&lt;/code&gt; 函数的实现。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;code&gt;REAL(isdigit)(&#39;1&#39;)&lt;/code&gt; 用于调用真正的 &lt;code&gt;isdigit&lt;/code&gt; 实现，不过在调用 &lt;code&gt;REAL(isdigit)(&#39;1&#39;)&lt;/code&gt; 之前需要先 &lt;code&gt;DECLARE_REAL(int, isdigit, int)&lt;/code&gt;。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;这部分代码在宏展开后的内容如下：&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// INTERCEPTOR(int, isdigit, int d) 宏展开
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;typedef&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;int&lt;/span&gt; (&lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;isdigit_type)(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;namespace&lt;/span&gt; __interception { isdigit_type real_isdigit; }
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;C&amp;#34;&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; isdigit(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d) __attribute__((weak, alias(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;__interceptor_isdigit&amp;#34;&lt;/span&gt;), visibility(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;default&amp;#34;&lt;/span&gt;)));
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;C&amp;#34;&lt;/span&gt; __attribute__((visibility(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;default&amp;#34;&lt;/span&gt;))) &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; __interceptor_isdigit(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d) {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#f92672&#34;&gt;++&lt;/span&gt;InterceptorFunctionCalled;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;0&amp;#39;&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&amp;amp;&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;9&amp;#39;&lt;/span&gt;;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// INTERCEPT_FUNCTION(isdigit) 宏展开
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;__interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;InterceptFunction(
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;isdigit&amp;#34;&lt;/span&gt;,
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    (&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;__interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;uptr &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;) &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt; __interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;real_isdigit,
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    (&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;__interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;uptr) &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt; (isdigit),
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    (&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;__interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;uptr) &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt; __interceptor_isdigit);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// DECLARE_REAL(int, isdigit, int) 宏展开
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;typedef&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;int&lt;/span&gt; (&lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;isdigit_type)(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;namespace&lt;/span&gt; __interception { &lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; isdigit_type real_isdigit; };
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// REAL(isdigit)(&amp;#39;1&amp;#39;) 宏展开
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;__interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;real_isdigit(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;1&amp;#39;&lt;/span&gt;);
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;我们首先看下 INTERCEPTOR 宏做了哪些事情&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;首先在 __interception namespace 中定义了一个函数指针 real_isdigit，该函数指针实际上后续会被设置为指向真正的 &lt;code&gt;isdigit&lt;/code&gt; 函数地址。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;然后将 &lt;code&gt;isdigit&lt;/code&gt; 函数设置为 weak，并且将 &lt;code&gt;isdigit&lt;/code&gt; 设置成 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 的 alias 别名&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;最后将我们自己版本的 &lt;code&gt;isdigit&lt;/code&gt; 函数逻辑实现在 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 函数中&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;根据 symbol interposition 这一节的内容，我们知道：要想替换 libc.so 中 某个函数的实现（不妨把该函数称作 &lt;code&gt;foo&lt;/code&gt;），只需要在 sanitizer runtime library 中定义同名 &lt;code&gt;foo&lt;/code&gt; 函数，然后让 dynamic loader 在查找符号时 sanitizer runtime library 的顺序先于 libc.so 即可。&lt;/p&gt;
+&lt;p&gt;那为什么这里要将我们的 &lt;code&gt;isdigit&lt;/code&gt; 函数逻辑实现在函数 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 中，并且将 &lt;code&gt;isdigit&lt;/code&gt; 设置成 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 的 alias 别名呢？&lt;/p&gt;
+&lt;p&gt;考虑如下场景：假设用户代码中也替换了 &lt;code&gt;isdigit&lt;/code&gt; 函数的实现，添加了自己的逻辑，那么最终 dynamic loader 选择的是用户代码中的 &lt;code&gt;isdigit&lt;/code&gt; 的实现，而不是 sanitizer runtime library 中的 &lt;code&gt;isdigit&lt;/code&gt; 的实现，这样的话 sanitizer 的功能就不能正常工作了。（实际上 sanitizer runtime library 中并没有替换 &lt;code&gt;isdigit&lt;/code&gt; 的实现，这里只是用 &lt;code&gt;isdigit&lt;/code&gt; 举例子便于说明）。&lt;/p&gt;
+&lt;p&gt;但是如果我们在 sanitizer runtime library 中将 &lt;code&gt;isdigit&lt;/code&gt; 设置成 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 的 alias 别名，那么在用户代码中自己替换 &lt;code&gt;isdigit&lt;/code&gt; 实现时就可以显示调用 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 了。这样既不影响用户自行替换库函数，也不影响 sanitizer 功能的正确运行 ：&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;C&amp;#34;&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; __interceptor_isdigit(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;C&amp;#34;&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; isdigit(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d) {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  fprintf(stderr, &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;my_isdigit_interceptor&lt;/span&gt;&lt;span style=&#34;color:#ae81ff&#34;&gt;\n&lt;/span&gt;&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;&lt;/span&gt;);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;__interceptor_isdigit&lt;/span&gt;(d);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;那在 sanitizer runtime library 中为什么将被替换的函数设置为 weak 呢？&lt;/p&gt;
+&lt;p&gt;这是因为如果不设置为 weak ，在静态链接 sanitizer runtime library 时就会因为 multiple definition 而链接失败。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;接着我们看下 INTERCEPT_FUNCTION 宏做了哪些事情&lt;/p&gt;
+&lt;p&gt;INTERCEPT_FUNCTION 宏展开后就是对 __interception::InterceptFunction 函数的调用。&lt;code&gt;InterceptFunction&lt;/code&gt; 函数的定义在 &lt;a href=&#34;https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/interception_linux.cpp&#34;&gt;https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/interception_linux.cpp&lt;/a&gt;：&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;namespace&lt;/span&gt; __interception {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;static&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;&lt;span style=&#34;color:#a6e22e&#34;&gt;GetFuncAddr&lt;/span&gt;(&lt;span style=&#34;color:#66d9ef&#34;&gt;const&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;char&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;name, uptr wrapper_addr) {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; dlsym(RTLD_NEXT, name);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;if&lt;/span&gt; (&lt;span style=&#34;color:#f92672&#34;&gt;!&lt;/span&gt;addr) {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// If the lookup using RTLD_NEXT failed, the sanitizer runtime library is
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// later in the library search order than the DSO that we are trying to
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// intercept, which means that we cannot intercept this function. We still
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// want the address of the real definition, though, so look it up using
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// RTLD_DEFAULT.
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; dlsym(RTLD_DEFAULT, name);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// In case `name&amp;#39; is not loaded, dlsym ends up finding the actual wrapper.
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// We don&amp;#39;t want to intercept the wrapper and have it point to itself.
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#66d9ef&#34;&gt;if&lt;/span&gt; ((uptr)addr &lt;span style=&#34;color:#f92672&#34;&gt;==&lt;/span&gt; wrapper_addr)
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;      addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;nullptr&lt;/span&gt;;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  }
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; addr;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;bool&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;InterceptFunction&lt;/span&gt;(&lt;span style=&#34;color:#66d9ef&#34;&gt;const&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;char&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;name, uptr &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;ptr_to_real, uptr func,
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;                       uptr wrapper) {
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; GetFuncAddr(name, wrapper);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;ptr_to_real &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; (uptr)addr;
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; addr &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&amp;amp;&lt;/span&gt; (func &lt;span style=&#34;color:#f92672&#34;&gt;==&lt;/span&gt; wrapper);
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
+&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}  &lt;span style=&#34;color:#75715e&#34;&gt;// namespace __interception
+&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;其实 &lt;code&gt;InterceptFunction&lt;/code&gt; 函数的实现很简单：首先通过函数 &lt;code&gt;GetFuncAddr&lt;/code&gt; 获得原本的名为 name 的函数地址，然后将该地址保存至指针 &lt;code&gt;ptr_to_real&lt;/code&gt; 指向的内存。&lt;/p&gt;
+&lt;p&gt;函数 &lt;code&gt;GetFuncAddr&lt;/code&gt; 的代码实现也很简单，核心就是 &lt;a href=&#34;https://man7.org/linux/man-pages/man3/dlsym.3.html&#34;&gt;dlsym&lt;/a&gt;：&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;RTLD_DEFAULT
+    Find the first occurrence of the desired symbol using the
+    default shared object search order.  The search will
+    include global symbols in the executable and its
+    dependencies, as well as symbols in shared objects that
+    were dynamically loaded with the RTLD_GLOBAL flag.
+
+RTLD_NEXT
+    Find the next occurrence of the desired symbol in the
+    search order after the current object.  This allows one to
+    provide a wrapper around a function in another shared
+    object, so that, for example, the definition of a function
+    in a preloaded shared object (see LD_PRELOAD in ld.so(8))
+    can find and invoke the &amp;quot;real&amp;quot; function provided in
+    another shared object (or for that matter, the &amp;quot;next&amp;quot;
+    definition of the function in cases where there are
+    multiple layers of preloading).
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;这也是为什么在函数 &lt;code&gt;GetFuncAddr&lt;/code&gt; 中，先用 &lt;code&gt;dlsym(RTLD_NEXT, name)&lt;/code&gt; 去寻找被 intercepted 函数的真实地址，因为 sanitizer runtime library 是先于 name 函数真正所在的 shared object。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;最后我们看下 DECLARE_REAL 宏 和 REAL 宏做了哪些事情&lt;/p&gt;
+&lt;p&gt;DECLARE_REAL 展开后就是声明了在 __interception namespace 中存在一个指向被替换函数真正实现的函数指针，REAL 宏就是通过这个函数指针来调用被替换函数的真正实现。&lt;/p&gt;
+&lt;p&gt;例如，在测试用例中，&lt;code&gt;DECLARE_REAL(int, isdigit, int);&lt;/code&gt; 就是在声明 __interception namespace 中存在一个函数指针 &lt;code&gt;real_isdigit&lt;/code&gt;，该函数指针指向真正的 &lt;code&gt;isdigit&lt;/code&gt; 函数地址，通过 &lt;code&gt;REAL(isdigit)&lt;/code&gt; 来调用真正的 &lt;code&gt;isdigit&lt;/code&gt; 函数。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id=&#34;ps&#34;&gt;P.S.&lt;/h2&gt;
+&lt;p&gt;&lt;code&gt;__attribute__((alias))&lt;/code&gt; 很有意思：&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;Where a function is defined in the current translation unit, the alias call is replaced by a call to the function, and the alias is emitted alongside the original name. Where a function is not defined in the current translation unit, the alias call is replaced by a call to the real function. Where a function is defined as static, the function name is replaced by the alias name and the function is declared external if the alias name is declared external.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;在 ASan runtime library 中 malloc 是 weak 符号，并且 malloc 和 __interceptor_malloc 实际指向同一个地址。&lt;/p&gt;
+&lt;p&gt;也就是说 &lt;code&gt;extern &amp;quot;C&amp;quot; void *malloc(size_t size) __attribute__((weak, alias(&amp;quot;__interceptor_malloc&amp;quot;), visibility(&amp;quot;default&amp;quot;)));&lt;/code&gt; 使得在 ASan runtime library 中造了一个弱符号 malloc，然后指向的和 __interceptor_malloc 是同一个地址。&lt;/p&gt;
+&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;$ readelf -sW --dyn-syms $(clang -print-file-name=libclang_rt.asan-x86_64.a) | grep malloc
+  ...
+  99: 0000000000001150   606 FUNC    GLOBAL DEFAULT    3 __interceptor_malloc
+  102: 0000000000001150   606 FUNC    WEAK   DEFAULT    3 malloc
+
+$ readelf -sW --dyn-syms $(clang -print-file-name=libclang_rt.asan-x86_64.so) | grep malloc
+  ...
+  3008: 00000000000fd600   606 FUNC    WEAK   DEFAULT   12 malloc
+  4519: 00000000000fd600   606 FUNC    GLOBAL DEFAULT   12 __interceptor_malloc
+&lt;/code&gt;&lt;/pre&gt;&lt;h2 id=&#34;ps2&#34;&gt;P.S.2&lt;/h2&gt;
+&lt;p&gt;熟悉在 Linux 下 sanitizer interceptor 机制的底层原理后，就很容易明白使用 sanitizer 时遇到的一些问题或坑为什么会是这样的。例如：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;a href=&#34;https://github.com/google/sanitizers/issues/611&#34;&gt;Address Sanitizer fails to intercept function in shared library opened with RTLD_DEEPBIND · Issue #611 · google/sanitizers · GitHub&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;a href=&#34;https://github.com/google/sanitizers/issues/796&#34;&gt;ASan runtime does not come first in initial library list; you should either link runtime to your application or manually preload it with LD_PRELOAD. · Issue #796 · google/sanitizers · GitHub&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;a href=&#34;https://stackoverflow.com/questions/66971217/is-it-okay-if-asan-runtime-loaded-as-second-library&#34;&gt;address sanitizer - Is it okay if ASAN runtime loaded as second library? - Stack Overflow&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id=&#34;references&#34;&gt;References&lt;/h2&gt;
+&lt;ol&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;a href=&#34;https://maskray.me/blog/2021-05-16-elf-interposition-and-bsymbolic&#34;&gt;ELF interposition and -Bsymbolic | MaskRay&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;a href=&#34;https://man7.org/linux/man-pages/man3/dlsym.3.html&#34;&gt;dlsym(3) - Linux manual pagedlsym(3) - Linux manual page&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;a href=&#34;https://github.com/llvm/llvm-project/commit/7fb7330469af52ae1313b2b47c273e62c61a4dd5&#34;&gt;asan/tsan: weak interceptors · llvm/llvm-project@7fb7330 · GitHub&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;</description>
+    </item>
     
     <item>
       <title>How Sanitizer Runtime Initialized</title>
