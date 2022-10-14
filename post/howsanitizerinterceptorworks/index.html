@@ -1,172 +1,33 @@
-<!DOCTYPE html>
-<html class="no-js" lang="en">
-<head>
-	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<meta http-equiv="X-UA-Compatible" content="IE=edge">
-	<title>How Sanitizer Interceptor Works - Enna1&#39;s blog</title>
-	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
-	<meta name="description" content="">
-		<meta property="og:title" content="How Sanitizer Interceptor Works" />
-<meta property="og:description" content="本文分析了 sanitizer 是如何做到替换 malloc, free, memcpy 这些库函数的实现的。即 sanitizer 中的 interceptor 机制。" />
-<meta property="og:type" content="article" />
-<meta property="og:url" content="https://enna1.github.io/post/howsanitizerinterceptorworks/" /><meta property="article:section" content="post" />
-<meta property="article:published_time" content="2022-09-18T00:00:00+00:00" />
-<meta property="article:modified_time" content="2022-09-18T00:00:00+00:00" />
-
-
-	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-	<link rel="dns-prefetch" href="//fonts.googleapis.com">
-	<link rel="dns-prefetch" href="//fonts.gstatic.com">
-	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
-
-	<link rel="stylesheet" href="/css/style.css">
-	
-
-	<link rel="shortcut icon" href="/favicon.ico">
-		
-</head>
-<body class="body">
-	<div class="container container--outer">
-		<header class="header">
-	<div class="container header__container">
-		
-	<div class="logo">
-		<a class="logo__link" href="/" title="Enna1&#39;s blog" rel="home">
-			<div class="logo__item logo__text">
-					<div class="logo__title">Enna1&#39;s blog</div>
-					<div class="logo__tagline">Nobody dies a virgin, life fucks us all!</div>
-				</div>
-		</a>
-	</div>
-		
-<nav class="menu">
-	<button class="menu__btn" aria-haspopup="true" aria-expanded="false" tabindex="0">
-		<span class="menu__btn-title" tabindex="-1">Menu</span>
-	</button>
-	<ul class="menu__list">
-		<li class="menu__item">
-			<a class="menu__link" href="/">
-				
-				<span class="menu__text">home</span>
-				
-			</a>
-		</li>
-		<li class="menu__item">
-			<a class="menu__link" href="/post/">
-				
-				<span class="menu__text">blog</span>
-				
-			</a>
-		</li>
-		<li class="menu__item">
-			<a class="menu__link" href="/podcast/">
-				
-				<span class="menu__text">podcast</span>
-				
-			</a>
-		</li>
-		<li class="menu__item">
-			<a class="menu__link" href="/archives/">
-				
-				<span class="menu__text">archives</span>
-				
-			</a>
-		</li>
-		<li class="menu__item">
-			<a class="menu__link" href="/about/">
-				
-				<span class="menu__text">about</span>
-				
-			</a>
-		</li>
-	</ul>
-</nav>
-
-	</div>
-</header>
-		<div class="wrapper flex">
-			<div class="primary">
-			
-<main class="main" role="main">
-	<article class="post">
-		<header class="post__header">
-			<h1 class="post__title">How Sanitizer Interceptor Works</h1>
-			<div class="post__meta meta">
-<div class="meta__item-datetime meta__item">
-	<svg class="meta__icon icon icon-time" width="16" height="14" viewBox="0 0 30 28"><path d="M15 0C7 0 1 6 1 14s6 14 14 14 14-6 14-14S23 0 15 0zm0 25C9 25 4 20 4 14S9 3 15 3s11 5 11 11-5 11-11 11zm1-18h-2v8.4l6.8 4.4L22 18l-6-3.8V7z"/></svg><time class="meta__text" datetime="2022-09-18T00:00:00Z">September 18, 2022</time></div><div class="meta__item-categories meta__item"><svg class="meta__icon icon icon-category" width="16" height="16" viewBox="0 0 16 16"><path d="m7 2l1 2h8v11h-16v-13z"/></svg><span class="meta__text"><a class="meta__link" href="/categories/sanitizer/" rel="category">Sanitizer</a>, <a class="meta__link" href="/categories/llvm/" rel="category">LLVM</a>
-	</span>
-</div></div>
-		</header>
-		<div class="content post__content clearfix">
-			<p>本文分析了 sanitizer 是如何做到替换 malloc, free, memcpy 这些库函数的实现的。即 sanitizer 中的 interceptor 机制。</p>
-<p>我们在前面的文章中提到，所有的 Sanitizer 都由编译时插桩 (compile-time instrumentation) 和运行时库 (run-time library) 两部分组成。</p>
-<p>那么 sanitizer 的运行时库中做了哪些事情呢？</p>
-<p>以 ASan 为例：</p>
-<ul>
-<li>
-<p>ASan 编译时会在每一处内存读写语句之前插入代码，根据每一次访问的内存所对应的影子内存 ( shadow memory，就是使用额外的内存记录常规内存的状态）的状态来检测本次内存访问是否合法。还会在栈变量和全局变量附近申请额外内存作为危险区用于检测内存溢出。</p>
-</li>
-<li>
-<p>ASan 运行时库中最主要的就是替换了 malloc/free, new/delete 的实现，这样应用程序的内存分配都由 ASan 实现的内存分配器负责。ASan 内存分配器会在它分配的堆内存附近申请额外内存用于检测堆内存溢出，还会将被释放的内存优先放在隔离区 (quarantine) 用于检测像 heap-use-after-free, double-free 这样的堆内存错误。</p>
-</li>
-</ul>
-<p>ASan 运行时库中实际上不止替换了 malloc/free, new/delete 的函数实现，还替换了非常多的库函数的实现，如：memcpy, memmove, strcpy, strcat, pthread_create 等。</p>
-<p>那么 sanitizer 是如何做到替换 malloc, free, memcpy 这些函数实现的呢？答案就是 sanitizer 中的 interceptor 机制。</p>
-<p>本文以 ASan 为例，分析在 Linux x86_64 环境下 sanitizer interceptor 的实现原理。</p>
-<h2 id="symbol-interposition">Symbol interposition</h2>
-<p>在讲解 sanitizer interceptor 的实现原理之前，我们先来了解一下前置知识：symbol interposition。</p>
-<p>首先我们考虑这样一个问题：如何在我们的应用程序中替换 libc 的 malloc 实现为我们自己实现的版本？</p>
-<ol>
-<li>
-<p>一个最简单的方式就是在我们的应用程序中定义一个同名的 malloc 函数</p>
-</li>
-<li>
-<p>还有一种方式就是将我们的 malloc 函数实现在 libmymalloc.so 中，然后在运行我们的应用程序之前设置环境变量 <code>LD_PRELOAD=/path/to/libmymalloc.so</code></p>
-</li>
-</ol>
-<p>那么为什么上述两种方式能生效呢？答案是 symbol interposition。</p>
-<p><a href="http://www.sco.com/developers/gabi/latest/contents.html">ELF specfication</a> 在第五章 Program Loading and Dynamic Linking 中提到：</p>
-<blockquote>
-<p>When resolving symbolic references, the dynamic linker examines the symbol tables with a breadth-first search. That is, it first looks at the symbol table of the executable program itself, then at the symbol tables of the <code>DT_NEEDED</code> entries (in order), and then at the second level <code>DT_NEEDED</code> entries, and so on.</p>
-</blockquote>
-<p>动态链接器 (dynamic linker/loader) 在符号引用绑定 (binding symbol references) 时，以一种广度优先搜索的顺序来查找符号：executable, needed0.so, needed1.so, needed2.so, needed0_of_needed0.so, needed1_of_needed0.so, &hellip;</p>
-<p>如果设置了 LD_PRELOAD，那么查找符号的顺序会变为：executable, preload0.so, preload1.so needed0.so, needed1.so, needed2.so, needed0_of_needed0.so, needed1_of_needed0.so, &hellip;</p>
-<p>如果一个符号在多个组件（executable 或 shared object）中都存在定义，那么动态链接器会选择它所看到的第一个定义。</p>
-<p>我们通过一个例子来理解该过程：</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#960050;background-color:#1e0010">$</span> cat main.c
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">extern</span> <span style="color:#66d9ef">int</span> W(), X();
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>() { <span style="color:#66d9ef">return</span> (W() <span style="color:#f92672">+</span> X()); }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#960050;background-color:#1e0010">$</span> cat W.c
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">extern</span> <span style="color:#66d9ef">int</span> b();
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">a</span>() { <span style="color:#66d9ef">return</span> (<span style="color:#ae81ff">1</span>); }
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">W</span>() { <span style="color:#66d9ef">return</span> (a() <span style="color:#f92672">-</span> b()); }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#960050;background-color:#1e0010">$</span> cat w.c
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> b() { <span style="color:#66d9ef">return</span> (<span style="color:#ae81ff">2</span>); }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#960050;background-color:#1e0010">$</span> cat X.c
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">extern</span> <span style="color:#66d9ef">int</span> b();
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">a</span>() { <span style="color:#66d9ef">return</span> (<span style="color:#ae81ff">3</span>); }
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">X</span>() { <span style="color:#66d9ef">return</span> (a() <span style="color:#f92672">-</span> b()); }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#960050;background-color:#1e0010">$</span> cat x.c
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> b() { <span style="color:#66d9ef">return</span> (<span style="color:#ae81ff">4</span>); }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#960050;background-color:#1e0010">$</span> gcc <span style="color:#f92672">-</span>o libw.so <span style="color:#f92672">-</span>shared w.c
-</span></span><span style="display:flex;"><span><span style="color:#960050;background-color:#1e0010">$</span> gcc <span style="color:#f92672">-</span>o libW.so <span style="color:#f92672">-</span>shared W.c <span style="color:#f92672">-</span>L. <span style="color:#f92672">-</span>lw <span style="color:#f92672">-</span>Wl,<span style="color:#f92672">-</span>rpath<span style="color:#f92672">=</span>.
-</span></span><span style="display:flex;"><span><span style="color:#960050;background-color:#1e0010">$</span> gcc <span style="color:#f92672">-</span>o libx.so <span style="color:#f92672">-</span>shared x.c
-</span></span><span style="display:flex;"><span><span style="color:#960050;background-color:#1e0010">$</span> gcc <span style="color:#f92672">-</span>o libX.so <span style="color:#f92672">-</span>shared X.c <span style="color:#f92672">-</span>L. <span style="color:#f92672">-</span>lx <span style="color:#f92672">-</span>Wl,<span style="color:#f92672">-</span>rpath<span style="color:#f92672">=</span>.
-</span></span><span style="display:flex;"><span><span style="color:#960050;background-color:#1e0010">$</span> gcc <span style="color:#f92672">-</span>o test<span style="color:#f92672">-</span>symbind main.c <span style="color:#f92672">-</span>L. <span style="color:#f92672">-</span>lW <span style="color:#f92672">-</span>lX <span style="color:#f92672">-</span>Wl,<span style="color:#f92672">-</span>rpath<span style="color:#f92672">=</span>.
-</span></span></code></pre></div><p>该例子中可执行文件与动态库之间的依赖关系如下图所示：</p>
-<p><img src="/blog/sanitizer-interceptor/2022-10-02-20-18-44-image.png" alt=""></p>
-<p>按照我们前面所说，本例中动态链接器在进行符号引用绑定时，是按照广度优先搜索的顺序，即：test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的。</p>
-<p>动态链接器提供了环境变量 LD_DEBUG 来输出一些调试信息，我们可以通过设置环境变量 LD_DEBUG=&ldquo;symbols:bindings&rdquo; 看下 test-symbind 的 symbol binding 的过程：</p>
-<pre tabindex="0"><code>$ LD_DEBUG=&#34;symbols:bindings&#34; ./test-symbind
+<!doctype html><html class=no-js lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta http-equiv=x-ua-compatible content="IE=edge"><title>How Sanitizer Interceptor Works - Enna1's blog</title><script>(function(e,t){e[t]=e[t].replace("no-js","js")})(document.documentElement,"className")</script><meta name=description content><meta property="og:title" content="How Sanitizer Interceptor Works"><meta property="og:description" content="本文分析了 sanitizer 是如何做到替换 malloc, free, memcpy 这些库函数的实现的。即 sanitizer 中的 interceptor 机制。"><meta property="og:type" content="article"><meta property="og:url" content="https://enna1.github.io/post/howsanitizerinterceptorworks/"><meta property="article:section" content="post"><meta property="article:published_time" content="2022-09-18T00:00:00+00:00"><meta property="article:modified_time" content="2022-09-18T00:00:00+00:00"><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link rel=dns-prefetch href=//fonts.googleapis.com><link rel=dns-prefetch href=//fonts.gstatic.com><link rel=stylesheet href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700"><link rel=stylesheet href=/css/style.css><link rel="shortcut icon" href=/favicon.ico></head><body class=body><div class="container container--outer"><header class=header><div class="container header__container"><div class=logo><a class=logo__link href=/ title="Enna1's blog" rel=home><div class="logo__item logo__text"><div class=logo__title>Enna1's blog</div><div class=logo__tagline>Nobody dies a virgin, life fucks us all!</div></div></a></div><nav class=menu><button class=menu__btn aria-haspopup=true aria-expanded=false tabindex=0>
+<span class=menu__btn-title tabindex=-1>Menu</span></button><ul class=menu__list><li class=menu__item><a class=menu__link href=/><span class=menu__text>home</span></a></li><li class=menu__item><a class=menu__link href=/post/><span class=menu__text>blog</span></a></li><li class=menu__item><a class=menu__link href=/podcast/><span class=menu__text>podcast</span></a></li><li class=menu__item><a class=menu__link href=/archives/><span class=menu__text>archives</span></a></li><li class=menu__item><a class=menu__link href=/about/><span class=menu__text>about</span></a></li></ul></nav></div></header><div class="wrapper flex"><div class=primary><main class=main role=main><article class=post><header class=post__header><h1 class=post__title>How Sanitizer Interceptor Works</h1><div class="post__meta meta"><div class="meta__item-datetime meta__item"><svg class="meta__icon icon icon-time" width="16" height="14" viewBox="0 0 30 28"><path d="M15 0C7 0 1 6 1 14s6 14 14 14 14-6 14-14S23 0 15 0zm0 25C9 25 4 20 4 14S9 3 15 3s11 5 11 11-5 11-11 11zm1-18h-2v8.4l6.8 4.4L22 18l-6-3.8V7z"/></svg><time class=meta__text datetime=2022-09-18T00:00:00Z>September 18, 2022</time></div><div class="meta__item-categories meta__item"><svg class="meta__icon icon icon-category" width="16" height="16" viewBox="0 0 16 16"><path d="m7 2 1 2h8v11H0V2z"/></svg><span class=meta__text><a class=meta__link href=/categories/sanitizer/ rel=category>Sanitizer</a>, <a class=meta__link href=/categories/llvm/ rel=category>LLVM</a></span></div></div></header><div class="content post__content clearfix"><p>本文分析了 sanitizer 是如何做到替换 malloc, free, memcpy 这些库函数的实现的。即 sanitizer 中的 interceptor 机制。</p><p>我们在前面的文章中提到，所有的 Sanitizer 都由编译时插桩 (compile-time instrumentation) 和运行时库 (run-time library) 两部分组成。</p><p>那么 sanitizer 的运行时库中做了哪些事情呢？</p><p>以 ASan 为例：</p><ul><li><p>ASan 编译时会在每一处内存读写语句之前插入代码，根据每一次访问的内存所对应的影子内存 ( shadow memory，就是使用额外的内存记录常规内存的状态）的状态来检测本次内存访问是否合法。还会在栈变量和全局变量附近申请额外内存作为危险区用于检测内存溢出。</p></li><li><p>ASan 运行时库中最主要的就是替换了 malloc/free, new/delete 的实现，这样应用程序的内存分配都由 ASan 实现的内存分配器负责。ASan 内存分配器会在它分配的堆内存附近申请额外内存用于检测堆内存溢出，还会将被释放的内存优先放在隔离区 (quarantine) 用于检测像 heap-use-after-free, double-free 这样的堆内存错误。</p></li></ul><p>ASan 运行时库中实际上不止替换了 malloc/free, new/delete 的函数实现，还替换了非常多的库函数的实现，如：memcpy, memmove, strcpy, strcat, pthread_create 等。</p><p>那么 sanitizer 是如何做到替换 malloc, free, memcpy 这些函数实现的呢？答案就是 sanitizer 中的 interceptor 机制。</p><p>本文以 ASan 为例，分析在 Linux x86_64 环境下 sanitizer interceptor 的实现原理。</p><h2 id=symbol-interposition>Symbol interposition</h2><p>在讲解 sanitizer interceptor 的实现原理之前，我们先来了解一下前置知识：symbol interposition。</p><p>首先我们考虑这样一个问题：如何在我们的应用程序中替换 libc 的 malloc 实现为我们自己实现的版本？</p><ol><li><p>一个最简单的方式就是在我们的应用程序中定义一个同名的 malloc 函数</p></li><li><p>还有一种方式就是将我们的 malloc 函数实现在 libmymalloc.so 中，然后在运行我们的应用程序之前设置环境变量 <code>LD_PRELOAD=/path/to/libmymalloc.so</code></p></li></ol><p>那么为什么上述两种方式能生效呢？答案是 symbol interposition。</p><p><a href=http://www.sco.com/developers/gabi/latest/contents.html>ELF specfication</a> 在第五章 Program Loading and Dynamic Linking 中提到：</p><blockquote><p>When resolving symbolic references, the dynamic linker examines the symbol tables with a breadth-first search. That is, it first looks at the symbol table of the executable program itself, then at the symbol tables of the <code>DT_NEEDED</code> entries (in order), and then at the second level <code>DT_NEEDED</code> entries, and so on.</p></blockquote><p>动态链接器 (dynamic linker/loader) 在符号引用绑定 (binding symbol references) 时，以一种广度优先搜索的顺序来查找符号：executable, needed0.so, needed1.so, needed2.so, needed0_of_needed0.so, needed1_of_needed0.so, &mldr;</p><p>如果设置了 LD_PRELOAD，那么查找符号的顺序会变为：executable, preload0.so, preload1.so needed0.so, needed1.so, needed2.so, needed0_of_needed0.so, needed1_of_needed0.so, &mldr;</p><p>如果一个符号在多个组件（executable 或 shared object）中都存在定义，那么动态链接器会选择它所看到的第一个定义。</p><p>我们通过一个例子来理解该过程：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#960050;background-color:#1e0010>$</span> cat main.c
+</span></span><span style=display:flex><span><span style=color:#66d9ef>extern</span> <span style=color:#66d9ef>int</span> W(), X();
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>main</span>() { <span style=color:#66d9ef>return</span> (W() <span style=color:#f92672>+</span> X()); }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#960050;background-color:#1e0010>$</span> cat W.c
+</span></span><span style=display:flex><span><span style=color:#66d9ef>extern</span> <span style=color:#66d9ef>int</span> b();
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>a</span>() { <span style=color:#66d9ef>return</span> (<span style=color:#ae81ff>1</span>); }
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>W</span>() { <span style=color:#66d9ef>return</span> (a() <span style=color:#f92672>-</span> b()); }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#960050;background-color:#1e0010>$</span> cat w.c
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> b() { <span style=color:#66d9ef>return</span> (<span style=color:#ae81ff>2</span>); }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#960050;background-color:#1e0010>$</span> cat X.c
+</span></span><span style=display:flex><span><span style=color:#66d9ef>extern</span> <span style=color:#66d9ef>int</span> b();
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>a</span>() { <span style=color:#66d9ef>return</span> (<span style=color:#ae81ff>3</span>); }
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>X</span>() { <span style=color:#66d9ef>return</span> (a() <span style=color:#f92672>-</span> b()); }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#960050;background-color:#1e0010>$</span> cat x.c
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> b() { <span style=color:#66d9ef>return</span> (<span style=color:#ae81ff>4</span>); }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#960050;background-color:#1e0010>$</span> gcc <span style=color:#f92672>-</span>o libw.so <span style=color:#f92672>-</span>shared w.c
+</span></span><span style=display:flex><span><span style=color:#960050;background-color:#1e0010>$</span> gcc <span style=color:#f92672>-</span>o libW.so <span style=color:#f92672>-</span>shared W.c <span style=color:#f92672>-</span>L. <span style=color:#f92672>-</span>lw <span style=color:#f92672>-</span>Wl,<span style=color:#f92672>-</span>rpath<span style=color:#f92672>=</span>.
+</span></span><span style=display:flex><span><span style=color:#960050;background-color:#1e0010>$</span> gcc <span style=color:#f92672>-</span>o libx.so <span style=color:#f92672>-</span>shared x.c
+</span></span><span style=display:flex><span><span style=color:#960050;background-color:#1e0010>$</span> gcc <span style=color:#f92672>-</span>o libX.so <span style=color:#f92672>-</span>shared X.c <span style=color:#f92672>-</span>L. <span style=color:#f92672>-</span>lx <span style=color:#f92672>-</span>Wl,<span style=color:#f92672>-</span>rpath<span style=color:#f92672>=</span>.
+</span></span><span style=display:flex><span><span style=color:#960050;background-color:#1e0010>$</span> gcc <span style=color:#f92672>-</span>o test<span style=color:#f92672>-</span>symbind main.c <span style=color:#f92672>-</span>L. <span style=color:#f92672>-</span>lW <span style=color:#f92672>-</span>lX <span style=color:#f92672>-</span>Wl,<span style=color:#f92672>-</span>rpath<span style=color:#f92672>=</span>.
+</span></span></code></pre></div><p>该例子中可执行文件与动态库之间的依赖关系如下图所示：</p><p><img src=/blog/sanitizer-interceptor/2022-10-02-20-18-44-image.png alt></p><p>按照我们前面所说，本例中动态链接器在进行符号引用绑定时，是按照广度优先搜索的顺序，即：test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的。</p><p>动态链接器提供了环境变量 LD_DEBUG 来输出一些调试信息，我们可以通过设置环境变量 LD_DEBUG=&ldquo;symbols:bindings&rdquo; 看下 test-symbind 的 symbol binding 的过程：</p><pre tabindex=0><code>$ LD_DEBUG=&#34;symbols:bindings&#34; ./test-symbind
    1884890:        symbol=a;  lookup in file=./test-symbind [0]
    1884890:        symbol=a;  lookup in file=./libW.so [0]
    1884890:        binding file ./libW.so [0] to ./libW.so [0]: normal symbol `a&#39;
@@ -185,194 +46,121 @@
    1884890:        symbol=b;  lookup in file=/lib/x86_64-linux-gnu/libc.so.6 [0]
    1884890:        symbol=b;  lookup in file=./libw.so [0]
    1884890:        binding file ./libX.so [0] to ./libw.so [0]: normal symbol `b&#39;
-</code></pre><ul>
-<li>
-<p>函数 a 在 libW.so 和 libX.so 中都有一份定义，但因为是按照 test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的，所以最终所有对函数 a 的引用都绑定到 libW.so 中函数 a 的实现</p>
-</li>
-<li>
-<p>函数 b 在 libw.so 和 libx.so 中都有一份定义，但因为是按照 test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的，所以最终所有对函数 b 的引用都绑定到 libw.so 中函数 b 的实现</p>
-</li>
-</ul>
-<hr>
-<p>这样我们就理解为什么上述两种替换 malloc 的方式能生效了：</p>
-<ul>
-<li>
-<p>方式一：在我们的应用程序中定义一个同名的 malloc 函数。动态链接器在查找符号时 executable 的顺序在 libc.so 之前，因此所有对 malloc 的引用都会绑定到 executable 中 malloc 的实现。</p>
-</li>
-<li>
-<p>方式二：将我们的 malloc 函数实现在 libmymalloc.so 中，然后在运行我们的应用程序之前设置环境变量 LD_PRELOAD=/path/to/libmymalloc.so。动态链接器在查找符号时 libmymalloc.so 的顺序在 libc.so 之前，因此所有对 malloc 的引用都会绑定到 libmymalloc.so 中 malloc 的实现。</p>
-</li>
-</ul>
-<hr>
-<p>实际上 sanitizer 对于 malloc/free 等库函数的替换正是利用了 symbol interposition 这一特性。下面我们以 ASan 为例来验证一下。</p>
-<p>考虑如下代码：</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#75715e">// test.cpp
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;iostream&gt;</span><span style="color:#75715e">
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>() {
-</span></span><span style="display:flex;"><span>    std<span style="color:#f92672">::</span>cout <span style="color:#f92672">&lt;&lt;</span> <span style="color:#e6db74">&#34;Hello AddressSanitizer!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>;
-</span></span><span style="display:flex;"><span>}
-</span></span></code></pre></div><p>我们首先看下 GCC 的行为。</p>
-<p>使用 GCC 开启 ASan 编译 test.cpp ，<code>g++ -fsanitize=address test.cpp -o test-gcc-asan</code> 得到编译产物 test-gcc-asan。因为 GCC 默认会<strong>动态链接</strong> ASan 运行时库，所以我们可以使用 <code>objdump -p test-gcc-asan | grep NEEDED</code> 查看 test-gcc-asan 依赖的动态库 (shared objects)：</p>
-<pre tabindex="0"><code>$ objdump -p test-gcc-asan | grep NEEDED
+</code></pre><ul><li><p>函数 a 在 libW.so 和 libX.so 中都有一份定义，但因为是按照 test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的，所以最终所有对函数 a 的引用都绑定到 libW.so 中函数 a 的实现</p></li><li><p>函数 b 在 libw.so 和 libx.so 中都有一份定义，但因为是按照 test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的，所以最终所有对函数 b 的引用都绑定到 libw.so 中函数 b 的实现</p></li></ul><hr><p>这样我们就理解为什么上述两种替换 malloc 的方式能生效了：</p><ul><li><p>方式一：在我们的应用程序中定义一个同名的 malloc 函数。动态链接器在查找符号时 executable 的顺序在 libc.so 之前，因此所有对 malloc 的引用都会绑定到 executable 中 malloc 的实现。</p></li><li><p>方式二：将我们的 malloc 函数实现在 libmymalloc.so 中，然后在运行我们的应用程序之前设置环境变量 LD_PRELOAD=/path/to/libmymalloc.so。动态链接器在查找符号时 libmymalloc.so 的顺序在 libc.so 之前，因此所有对 malloc 的引用都会绑定到 libmymalloc.so 中 malloc 的实现。</p></li></ul><hr><p>实际上 sanitizer 对于 malloc/free 等库函数的替换正是利用了 symbol interposition 这一特性。下面我们以 ASan 为例来验证一下。</p><p>考虑如下代码：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#75715e>// test.cpp
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;iostream&gt;</span><span style=color:#75715e>
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>main</span>() {
+</span></span><span style=display:flex><span>    std<span style=color:#f92672>::</span>cout <span style=color:#f92672>&lt;&lt;</span> <span style=color:#e6db74>&#34;Hello AddressSanitizer!</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>我们首先看下 GCC 的行为。</p><p>使用 GCC 开启 ASan 编译 test.cpp ，<code>g++ -fsanitize=address test.cpp -o test-gcc-asan</code> 得到编译产物 test-gcc-asan。因为 GCC 默认会<strong>动态链接</strong> ASan 运行时库，所以我们可以使用 <code>objdump -p test-gcc-asan | grep NEEDED</code> 查看 test-gcc-asan 依赖的动态库 (shared objects)：</p><pre tabindex=0><code>$ objdump -p test-gcc-asan | grep NEEDED
   NEEDED               libasan.so.5
   NEEDED               libstdc++.so.6
   NEEDED               libm.so.6
   NEEDED               libgcc_s.so.1
   NEEDED               libc.so.6
-</code></pre><p>可以清楚的看到在 test-gcc-asan 依赖的动态库中 libasan.so 的顺序是在 libc.so 之前的。实际上链接时参数 <code>-fsanitize=address</code> 会使得 libasan.so 成为程序的第一个依赖库。</p>
-<p>然后我们再通过环境变量 LD_DEBUG 看下 test-gcc-asan 的 symbol bindding 的过程：</p>
-<pre tabindex="0"><code>$ LD_DEBUG=&#34;bindings&#34; ./test-gcc-asan
+</code></pre><p>可以清楚的看到在 test-gcc-asan 依赖的动态库中 libasan.so 的顺序是在 libc.so 之前的。实际上链接时参数 <code>-fsanitize=address</code> 会使得 libasan.so 成为程序的第一个依赖库。</p><p>然后我们再通过环境变量 LD_DEBUG 看下 test-gcc-asan 的 symbol bindding 的过程：</p><pre tabindex=0><code>$ LD_DEBUG=&#34;bindings&#34; ./test-gcc-asan
    3309213:        binding file /lib/x86_64-linux-gnu/libc.so.6 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&#39; [GLIBC_2.2.5]
    3309213:        binding file /lib64/ld-linux-x86-64.so.2 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&#39; [GLIBC_2.2.5]
    3309213:        binding file /usr/lib/x86_64-linux-gnu/libstdc++.so.6 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&#39; [GLIBC_2.2.5]
-</code></pre><p>可以看到动态链接器将 libc.so, ld-linux-x86-64.so 和 libstdc++.so 中对 malloc 的引用都绑定到了 libasan.so 中的 malloc 实现。</p>
-<hr>
-<p>下面我们看下 Clang，因为 Clang 默认是<strong>静态链接</strong> ASan 运行时库，所以我们就不看 test-clang-asan 所依赖的动态库了，直接看 symbol binding 的过程：</p>
-<pre tabindex="0"><code>$ clang++ -fsanitize=address test.cpp -o test-clang-asan
+</code></pre><p>可以看到动态链接器将 libc.so, ld-linux-x86-64.so 和 libstdc++.so 中对 malloc 的引用都绑定到了 libasan.so 中的 malloc 实现。</p><hr><p>下面我们看下 Clang，因为 Clang 默认是<strong>静态链接</strong> ASan 运行时库，所以我们就不看 test-clang-asan 所依赖的动态库了，直接看 symbol binding 的过程：</p><pre tabindex=0><code>$ clang++ -fsanitize=address test.cpp -o test-clang-asan
 $ LD_DEBUG=&#34;bindings&#34; ./test-clang-asan
    3313022:        binding file /lib/x86_64-linux-gnu/libc.so.6 [0] to ./test-clang-asan [0]: normal symbol `malloc&#39; [GLIBC_2.2.5]
    3313022:        binding file /lib64/ld-linux-x86-64.so.2 [0] to ./test-clang-asan [0]: normal symbol `malloc&#39; [GLIBC_2.2.5]
    3313022:        binding file /usr/lib/x86_64-linux-gnu/libstdc++.so.6 [0] to ./test-clang-asan [0]: normal symbol `malloc&#39; [GLIBC_2.2.5]
-</code></pre><p>同样可以看到动态链接器将 libc.so, ld-linux-x86-64.so.2 和 libstdc++.so 中对 malloc 的引用都绑定到了 test-clang-asan 中的 malloc 实现（因为 ASan 运行时库 中实现了 malloc，并且 clang 将 ASan 运行时库静态链接到 test-clang-asan 中）。</p>
-<h2 id="sanitizer-interceptor">Sanitizer interceptor</h2>
-<p>下面我们来在源码的角度，学习下 sanitizer interceptor 的实现。</p>
-<p>阅读学习 LLVM 代码的一个非常有效的方式就是结合对应的测试代码来学习。</p>
-<p>Sanitizer interceptor 存在一个测试文件 interception_linux_test.cpp，<a href="https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/tests/interception_linux_test.cpp">llvm-project/interception_linux_test.cpp at main · llvm/llvm-project · GitHub</a></p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&#34;interception/interception.h&#34;</span><span style="color:#75715e">
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&#34;gtest/gtest.h&#34;</span><span style="color:#75715e">
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">int</span> InterceptorFunctionCalled;
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>DECLARE_REAL(<span style="color:#66d9ef">int</span>, isdigit, <span style="color:#66d9ef">int</span>);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>INTERCEPTOR(<span style="color:#66d9ef">int</span>, isdigit, <span style="color:#66d9ef">int</span> d) {
-</span></span><span style="display:flex;"><span>  <span style="color:#f92672">++</span>InterceptorFunctionCalled;
-</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> d <span style="color:#f92672">&gt;=</span> <span style="color:#e6db74">&#39;0&#39;</span> <span style="color:#f92672">&amp;&amp;</span> d <span style="color:#f92672">&lt;=</span> <span style="color:#e6db74">&#39;9&#39;</span>;
-</span></span><span style="display:flex;"><span>}
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">namespace</span> __interception {
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>TEST(Interception, Basic) {
-</span></span><span style="display:flex;"><span>  EXPECT_TRUE(INTERCEPT_FUNCTION(isdigit));
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>  <span style="color:#75715e">// After interception, the counter should be incremented.
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>  InterceptorFunctionCalled <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
-</span></span><span style="display:flex;"><span>  EXPECT_NE(<span style="color:#ae81ff">0</span>, isdigit(<span style="color:#e6db74">&#39;1&#39;</span>));
-</span></span><span style="display:flex;"><span>  EXPECT_EQ(<span style="color:#ae81ff">1</span>, InterceptorFunctionCalled);
-</span></span><span style="display:flex;"><span>  EXPECT_EQ(<span style="color:#ae81ff">0</span>, isdigit(<span style="color:#e6db74">&#39;a&#39;</span>));
-</span></span><span style="display:flex;"><span>  EXPECT_EQ(<span style="color:#ae81ff">2</span>, InterceptorFunctionCalled);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>  <span style="color:#75715e">// Calling the REAL function should not affect the counter.
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>  InterceptorFunctionCalled <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
-</span></span><span style="display:flex;"><span>  EXPECT_NE(<span style="color:#ae81ff">0</span>, REAL(isdigit)(<span style="color:#e6db74">&#39;1&#39;</span>));
-</span></span><span style="display:flex;"><span>  EXPECT_EQ(<span style="color:#ae81ff">0</span>, REAL(isdigit)(<span style="color:#e6db74">&#39;a&#39;</span>));
-</span></span><span style="display:flex;"><span>  EXPECT_EQ(<span style="color:#ae81ff">0</span>, InterceptorFunctionCalled);
-</span></span><span style="display:flex;"><span>}
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>}  <span style="color:#75715e">// namespace __interception
-</span></span></span></code></pre></div><p>这段测试代码基于 sanitizer 的 interceptor 机制替换了 <code>isdigit</code> 函数的实现，在我们实现的 <code>isdigit</code> 函数中，每次 <code>isdigit</code> 函数被调用时都将变量 <code>InterceptorFunctionCalled</code> 自增 1。然后通过检验变量 <code>InterceptorFunctionCalled</code> 的值来测试 interceptor 机制的实现是否正确，通过 <code>REAL(isdigit)</code> 来调用真正的 <code>isdigit</code> 函数实现。</p>
-<p>上述测试文件 interception_linux_test.cpp 中实现替换 <code>isdigit</code> 函数的核心部分是如下代码片段：</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span>INTERCEPTOR(<span style="color:#66d9ef">int</span>, isdigit, <span style="color:#66d9ef">int</span> d) {
-</span></span><span style="display:flex;"><span>  <span style="color:#f92672">++</span>InterceptorFunctionCalled;
-</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> d <span style="color:#f92672">&gt;=</span> <span style="color:#e6db74">&#39;0&#39;</span> <span style="color:#f92672">&amp;&amp;</span> d <span style="color:#f92672">&lt;=</span> <span style="color:#e6db74">&#39;9&#39;</span>;
-</span></span><span style="display:flex;"><span>}
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>INTERCEPT_FUNCTION(isdigit);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>DECLARE_REAL(<span style="color:#66d9ef">int</span>, isdigit, <span style="color:#66d9ef">int</span>);
-</span></span><span style="display:flex;"><span>REAL(isdigit)(<span style="color:#e6db74">&#39;1&#39;</span>);
-</span></span></code></pre></div><ul>
-<li>
-<p><code>INTERCEPTOR(int, isdigit, int d) { ... }</code> 用于将函数 <code>isdigit</code> 的实现替换为 { &hellip; } 的实现</p>
-</li>
-<li>
-<p>在代码中调用 <code>isdigit</code> 之前，需要先调用 <code>INTERCEPT_FUNCTION(isdigit)</code>。如果 <code>INTERCEPT_FUNCTION(isdigit)</code> 返回为 true，则说明成功替换了将 libc 中 <code>isdigit</code> 函数的实现。</p>
-</li>
-<li>
-<p><code>REAL(isdigit)('1')</code> 用于调用真正的 <code>isdigit</code> 实现，不过在调用 <code>REAL(isdigit)('1')</code> 之前需要先 <code>DECLARE_REAL(int, isdigit, int)</code>。</p>
-</li>
-</ul>
-<p>这部分代码在宏展开后的内容如下：</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#75715e">// INTERCEPTOR(int, isdigit, int d) 宏展开
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">typedef</span> <span style="color:#a6e22e">int</span> (<span style="color:#f92672">*</span>isdigit_type)(<span style="color:#66d9ef">int</span> d);
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">namespace</span> __interception { isdigit_type real_isdigit; }
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">extern</span> <span style="color:#e6db74">&#34;C&#34;</span> <span style="color:#66d9ef">int</span> isdigit(<span style="color:#66d9ef">int</span> d) __attribute__((weak, alias(<span style="color:#e6db74">&#34;__interceptor_isdigit&#34;</span>), visibility(<span style="color:#e6db74">&#34;default&#34;</span>)));
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">extern</span> <span style="color:#e6db74">&#34;C&#34;</span> __attribute__((visibility(<span style="color:#e6db74">&#34;default&#34;</span>))) <span style="color:#66d9ef">int</span> __interceptor_isdigit(<span style="color:#66d9ef">int</span> d) {
-</span></span><span style="display:flex;"><span>  <span style="color:#f92672">++</span>InterceptorFunctionCalled;
-</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> d <span style="color:#f92672">&gt;=</span> <span style="color:#e6db74">&#39;0&#39;</span> <span style="color:#f92672">&amp;&amp;</span> d <span style="color:#f92672">&lt;=</span> <span style="color:#e6db74">&#39;9&#39;</span>;
-</span></span><span style="display:flex;"><span>}
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#75715e">// INTERCEPT_FUNCTION(isdigit) 宏展开
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#f92672">::</span>__interception<span style="color:#f92672">::</span>InterceptFunction(
-</span></span><span style="display:flex;"><span>    <span style="color:#e6db74">&#34;isdigit&#34;</span>,
-</span></span><span style="display:flex;"><span>    (<span style="color:#f92672">::</span>__interception<span style="color:#f92672">::</span>uptr <span style="color:#f92672">*</span>) <span style="color:#f92672">&amp;</span> __interception<span style="color:#f92672">::</span>real_isdigit,
-</span></span><span style="display:flex;"><span>    (<span style="color:#f92672">::</span>__interception<span style="color:#f92672">::</span>uptr) <span style="color:#f92672">&amp;</span> (isdigit),
-</span></span><span style="display:flex;"><span>    (<span style="color:#f92672">::</span>__interception<span style="color:#f92672">::</span>uptr) <span style="color:#f92672">&amp;</span> __interceptor_isdigit);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#75715e">// DECLARE_REAL(int, isdigit, int) 宏展开
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">typedef</span> <span style="color:#a6e22e">int</span> (<span style="color:#f92672">*</span>isdigit_type)(<span style="color:#66d9ef">int</span>);
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">namespace</span> __interception { <span style="color:#66d9ef">extern</span> isdigit_type real_isdigit; };
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#75715e">// REAL(isdigit)(&#39;1&#39;) 宏展开
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>__interception<span style="color:#f92672">::</span>real_isdigit(<span style="color:#e6db74">&#39;1&#39;</span>);
-</span></span></code></pre></div><ul>
-<li>
-<p>我们首先看下 INTERCEPTOR 宏做了哪些事情</p>
-<ul>
-<li>
-<p>首先在 __interception namespace 中定义了一个函数指针 real_isdigit，该函数指针实际上后续会被设置为指向真正的 <code>isdigit</code> 函数地址。</p>
-</li>
-<li>
-<p>然后将 <code>isdigit</code> 函数设置为 weak，并且将 <code>isdigit</code> 设置成 <code>__interceptor_isdigit</code> 的 alias 别名</p>
-</li>
-<li>
-<p>最后将我们自己版本的 <code>isdigit</code> 函数逻辑实现在 <code>__interceptor_isdigit</code> 函数中</p>
-</li>
-</ul>
-<p>根据 symbol interposition 这一节的内容，我们知道：要想替换 libc.so 中 某个函数的实现（不妨把该函数称作 <code>foo</code>），只需要在 sanitizer runtime library 中定义同名 <code>foo</code> 函数，然后让 dynamic loader 在查找符号时 sanitizer runtime library 的顺序先于 libc.so 即可。</p>
-<p>那为什么这里要将我们的 <code>isdigit</code> 函数逻辑实现在函数 <code>__interceptor_isdigit</code> 中，并且将 <code>isdigit</code> 设置成 <code>__interceptor_isdigit</code> 的 alias 别名呢？</p>
-<p>考虑如下场景：假设用户代码中也替换了 <code>isdigit</code> 函数的实现，添加了自己的逻辑，那么最终 dynamic loader 选择的是用户代码中的 <code>isdigit</code> 的实现，而不是 sanitizer runtime library 中的 <code>isdigit</code> 的实现，这样的话 sanitizer 的功能就不能正常工作了。（实际上 sanitizer runtime library 中并没有替换 <code>isdigit</code> 的实现，这里只是用 <code>isdigit</code> 举例子便于说明）。</p>
-<p>但是如果我们在 sanitizer runtime library 中将 <code>isdigit</code> 设置成 <code>__interceptor_isdigit</code> 的 alias 别名，那么在用户代码中自己替换 <code>isdigit</code> 实现时就可以显示调用 <code>__interceptor_isdigit</code> 了。这样既不影响用户自行替换库函数，也不影响 sanitizer 功能的正确运行 ：</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#66d9ef">extern</span> <span style="color:#e6db74">&#34;C&#34;</span> <span style="color:#66d9ef">int</span> __interceptor_isdigit(<span style="color:#66d9ef">int</span> d);
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">extern</span> <span style="color:#e6db74">&#34;C&#34;</span> <span style="color:#66d9ef">int</span> isdigit(<span style="color:#66d9ef">int</span> d) {
-</span></span><span style="display:flex;"><span>  fprintf(stderr, <span style="color:#e6db74">&#34;my_isdigit_interceptor</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>);
-</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> <span style="color:#a6e22e">__interceptor_isdigit</span>(d);
-</span></span><span style="display:flex;"><span>}
-</span></span></code></pre></div><p>那在 sanitizer runtime library 中为什么将被替换的函数设置为 weak 呢？</p>
-<p>这是因为如果不设置为 weak ，在静态链接 sanitizer runtime library 时就会因为 multiple definition 而链接失败。</p>
-</li>
-<li>
-<p>接着我们看下 INTERCEPT_FUNCTION 宏做了哪些事情</p>
-<p>INTERCEPT_FUNCTION 宏展开后就是对 __interception::InterceptFunction 函数的调用。<code>InterceptFunction</code> 函数的定义在 <a href="https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/interception_linux.cpp">https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/interception_linux.cpp</a>：</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-cpp" data-lang="cpp"><span style="display:flex;"><span><span style="color:#66d9ef">namespace</span> __interception {
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">GetFuncAddr</span>(<span style="color:#66d9ef">const</span> <span style="color:#66d9ef">char</span> <span style="color:#f92672">*</span>name, uptr wrapper_addr) {
-</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>addr <span style="color:#f92672">=</span> dlsym(RTLD_NEXT, name);
-</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>addr) {
-</span></span><span style="display:flex;"><span>    <span style="color:#75715e">// If the lookup using RTLD_NEXT failed, the sanitizer runtime library is
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#75715e">// later in the library search order than the DSO that we are trying to
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#75715e">// intercept, which means that we cannot intercept this function. We still
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#75715e">// want the address of the real definition, though, so look it up using
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#75715e">// RTLD_DEFAULT.
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    addr <span style="color:#f92672">=</span> dlsym(RTLD_DEFAULT, name);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>    <span style="color:#75715e">// In case `name&#39; is not loaded, dlsym ends up finding the actual wrapper.
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#75715e">// We don&#39;t want to intercept the wrapper and have it point to itself.
-</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> ((uptr)addr <span style="color:#f92672">==</span> wrapper_addr)
-</span></span><span style="display:flex;"><span>      addr <span style="color:#f92672">=</span> <span style="color:#66d9ef">nullptr</span>;
-</span></span><span style="display:flex;"><span>  }
-</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> addr;
-</span></span><span style="display:flex;"><span>}
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">bool</span> <span style="color:#a6e22e">InterceptFunction</span>(<span style="color:#66d9ef">const</span> <span style="color:#66d9ef">char</span> <span style="color:#f92672">*</span>name, uptr <span style="color:#f92672">*</span>ptr_to_real, uptr func,
-</span></span><span style="display:flex;"><span>                       uptr wrapper) {
-</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>addr <span style="color:#f92672">=</span> GetFuncAddr(name, wrapper);
-</span></span><span style="display:flex;"><span>  <span style="color:#f92672">*</span>ptr_to_real <span style="color:#f92672">=</span> (uptr)addr;
-</span></span><span style="display:flex;"><span>  <span style="color:#66d9ef">return</span> addr <span style="color:#f92672">&amp;&amp;</span> (func <span style="color:#f92672">==</span> wrapper);
-</span></span><span style="display:flex;"><span>}
-</span></span><span style="display:flex;"><span>}  <span style="color:#75715e">// namespace __interception
-</span></span></span></code></pre></div><p>其实 <code>InterceptFunction</code> 函数的实现很简单：首先通过函数 <code>GetFuncAddr</code> 获得原本的名为 name 的函数地址，然后将该地址保存至指针 <code>ptr_to_real</code> 指向的内存。</p>
-<p>函数 <code>GetFuncAddr</code> 的代码实现也很简单，核心就是 <a href="https://man7.org/linux/man-pages/man3/dlsym.3.html">dlsym</a>：</p>
-<pre><code>RTLD_DEFAULT
+</code></pre><p>同样可以看到动态链接器将 libc.so, ld-linux-x86-64.so.2 和 libstdc++.so 中对 malloc 的引用都绑定到了 test-clang-asan 中的 malloc 实现（因为 ASan 运行时库 中实现了 malloc，并且 clang 将 ASan 运行时库静态链接到 test-clang-asan 中）。</p><h2 id=sanitizer-interceptor>Sanitizer interceptor</h2><p>下面我们来在源码的角度，学习下 sanitizer interceptor 的实现。</p><p>阅读学习 LLVM 代码的一个非常有效的方式就是结合对应的测试代码来学习。</p><p>Sanitizer interceptor 存在一个测试文件 interception_linux_test.cpp，<a href=https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/tests/interception_linux_test.cpp>llvm-project/interception_linux_test.cpp at main · llvm/llvm-project · GitHub</a></p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&#34;interception/interception.h&#34;</span><span style=color:#75715e>
+</span></span></span><span style=display:flex><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&#34;gtest/gtest.h&#34;</span><span style=color:#75715e>
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>static</span> <span style=color:#66d9ef>int</span> InterceptorFunctionCalled;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>DECLARE_REAL(<span style=color:#66d9ef>int</span>, isdigit, <span style=color:#66d9ef>int</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>INTERCEPTOR(<span style=color:#66d9ef>int</span>, isdigit, <span style=color:#66d9ef>int</span> d) {
+</span></span><span style=display:flex><span>  <span style=color:#f92672>++</span>InterceptorFunctionCalled;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> d <span style=color:#f92672>&gt;=</span> <span style=color:#e6db74>&#39;0&#39;</span> <span style=color:#f92672>&amp;&amp;</span> d <span style=color:#f92672>&lt;=</span> <span style=color:#e6db74>&#39;9&#39;</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>namespace</span> __interception {
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>TEST(Interception, Basic) {
+</span></span><span style=display:flex><span>  EXPECT_TRUE(INTERCEPT_FUNCTION(isdigit));
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>  <span style=color:#75715e>// After interception, the counter should be incremented.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  InterceptorFunctionCalled <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>;
+</span></span><span style=display:flex><span>  EXPECT_NE(<span style=color:#ae81ff>0</span>, isdigit(<span style=color:#e6db74>&#39;1&#39;</span>));
+</span></span><span style=display:flex><span>  EXPECT_EQ(<span style=color:#ae81ff>1</span>, InterceptorFunctionCalled);
+</span></span><span style=display:flex><span>  EXPECT_EQ(<span style=color:#ae81ff>0</span>, isdigit(<span style=color:#e6db74>&#39;a&#39;</span>));
+</span></span><span style=display:flex><span>  EXPECT_EQ(<span style=color:#ae81ff>2</span>, InterceptorFunctionCalled);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>  <span style=color:#75715e>// Calling the REAL function should not affect the counter.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  InterceptorFunctionCalled <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>;
+</span></span><span style=display:flex><span>  EXPECT_NE(<span style=color:#ae81ff>0</span>, REAL(isdigit)(<span style=color:#e6db74>&#39;1&#39;</span>));
+</span></span><span style=display:flex><span>  EXPECT_EQ(<span style=color:#ae81ff>0</span>, REAL(isdigit)(<span style=color:#e6db74>&#39;a&#39;</span>));
+</span></span><span style=display:flex><span>  EXPECT_EQ(<span style=color:#ae81ff>0</span>, InterceptorFunctionCalled);
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>}  <span style=color:#75715e>// namespace __interception
+</span></span></span></code></pre></div><p>这段测试代码基于 sanitizer 的 interceptor 机制替换了 <code>isdigit</code> 函数的实现，在我们实现的 <code>isdigit</code> 函数中，每次 <code>isdigit</code> 函数被调用时都将变量 <code>InterceptorFunctionCalled</code> 自增 1。然后通过检验变量 <code>InterceptorFunctionCalled</code> 的值来测试 interceptor 机制的实现是否正确，通过 <code>REAL(isdigit)</code> 来调用真正的 <code>isdigit</code> 函数实现。</p><p>上述测试文件 interception_linux_test.cpp 中实现替换 <code>isdigit</code> 函数的核心部分是如下代码片段：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span>INTERCEPTOR(<span style=color:#66d9ef>int</span>, isdigit, <span style=color:#66d9ef>int</span> d) {
+</span></span><span style=display:flex><span>  <span style=color:#f92672>++</span>InterceptorFunctionCalled;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> d <span style=color:#f92672>&gt;=</span> <span style=color:#e6db74>&#39;0&#39;</span> <span style=color:#f92672>&amp;&amp;</span> d <span style=color:#f92672>&lt;=</span> <span style=color:#e6db74>&#39;9&#39;</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>INTERCEPT_FUNCTION(isdigit);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>DECLARE_REAL(<span style=color:#66d9ef>int</span>, isdigit, <span style=color:#66d9ef>int</span>);
+</span></span><span style=display:flex><span>REAL(isdigit)(<span style=color:#e6db74>&#39;1&#39;</span>);
+</span></span></code></pre></div><ul><li><p><code>INTERCEPTOR(int, isdigit, int d) { ... }</code> 用于将函数 <code>isdigit</code> 的实现替换为 { &mldr; } 的实现</p></li><li><p>在代码中调用 <code>isdigit</code> 之前，需要先调用 <code>INTERCEPT_FUNCTION(isdigit)</code>。如果 <code>INTERCEPT_FUNCTION(isdigit)</code> 返回为 true，则说明成功替换了将 libc 中 <code>isdigit</code> 函数的实现。</p></li><li><p><code>REAL(isdigit)('1')</code> 用于调用真正的 <code>isdigit</code> 实现，不过在调用 <code>REAL(isdigit)('1')</code> 之前需要先 <code>DECLARE_REAL(int, isdigit, int)</code>。</p></li></ul><p>这部分代码在宏展开后的内容如下：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#75715e>// INTERCEPTOR(int, isdigit, int d) 宏展开
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#66d9ef>typedef</span> <span style=color:#a6e22e>int</span> (<span style=color:#f92672>*</span>isdigit_type)(<span style=color:#66d9ef>int</span> d);
+</span></span><span style=display:flex><span><span style=color:#66d9ef>namespace</span> __interception { isdigit_type real_isdigit; }
+</span></span><span style=display:flex><span><span style=color:#66d9ef>extern</span> <span style=color:#e6db74>&#34;C&#34;</span> <span style=color:#66d9ef>int</span> isdigit(<span style=color:#66d9ef>int</span> d) __attribute__((weak, alias(<span style=color:#e6db74>&#34;__interceptor_isdigit&#34;</span>), visibility(<span style=color:#e6db74>&#34;default&#34;</span>)));
+</span></span><span style=display:flex><span><span style=color:#66d9ef>extern</span> <span style=color:#e6db74>&#34;C&#34;</span> __attribute__((visibility(<span style=color:#e6db74>&#34;default&#34;</span>))) <span style=color:#66d9ef>int</span> __interceptor_isdigit(<span style=color:#66d9ef>int</span> d) {
+</span></span><span style=display:flex><span>  <span style=color:#f92672>++</span>InterceptorFunctionCalled;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> d <span style=color:#f92672>&gt;=</span> <span style=color:#e6db74>&#39;0&#39;</span> <span style=color:#f92672>&amp;&amp;</span> d <span style=color:#f92672>&lt;=</span> <span style=color:#e6db74>&#39;9&#39;</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#75715e>// INTERCEPT_FUNCTION(isdigit) 宏展开
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#f92672>::</span>__interception<span style=color:#f92672>::</span>InterceptFunction(
+</span></span><span style=display:flex><span>    <span style=color:#e6db74>&#34;isdigit&#34;</span>,
+</span></span><span style=display:flex><span>    (<span style=color:#f92672>::</span>__interception<span style=color:#f92672>::</span>uptr <span style=color:#f92672>*</span>) <span style=color:#f92672>&amp;</span> __interception<span style=color:#f92672>::</span>real_isdigit,
+</span></span><span style=display:flex><span>    (<span style=color:#f92672>::</span>__interception<span style=color:#f92672>::</span>uptr) <span style=color:#f92672>&amp;</span> (isdigit),
+</span></span><span style=display:flex><span>    (<span style=color:#f92672>::</span>__interception<span style=color:#f92672>::</span>uptr) <span style=color:#f92672>&amp;</span> __interceptor_isdigit);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#75715e>// DECLARE_REAL(int, isdigit, int) 宏展开
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#66d9ef>typedef</span> <span style=color:#a6e22e>int</span> (<span style=color:#f92672>*</span>isdigit_type)(<span style=color:#66d9ef>int</span>);
+</span></span><span style=display:flex><span><span style=color:#66d9ef>namespace</span> __interception { <span style=color:#66d9ef>extern</span> isdigit_type real_isdigit; };
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#75715e>// REAL(isdigit)(&#39;1&#39;) 宏展开
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>__interception<span style=color:#f92672>::</span>real_isdigit(<span style=color:#e6db74>&#39;1&#39;</span>);
+</span></span></code></pre></div><ul><li><p>我们首先看下 INTERCEPTOR 宏做了哪些事情</p><ul><li><p>首先在 __interception namespace 中定义了一个函数指针 real_isdigit，该函数指针实际上后续会被设置为指向真正的 <code>isdigit</code> 函数地址。</p></li><li><p>然后将 <code>isdigit</code> 函数设置为 weak，并且将 <code>isdigit</code> 设置成 <code>__interceptor_isdigit</code> 的 alias 别名</p></li><li><p>最后将我们自己版本的 <code>isdigit</code> 函数逻辑实现在 <code>__interceptor_isdigit</code> 函数中</p></li></ul><p>根据 symbol interposition 这一节的内容，我们知道：要想替换 libc.so 中 某个函数的实现（不妨把该函数称作 <code>foo</code>），只需要在 sanitizer runtime library 中定义同名 <code>foo</code> 函数，然后让 dynamic loader 在查找符号时 sanitizer runtime library 的顺序先于 libc.so 即可。</p><p>那为什么这里要将我们的 <code>isdigit</code> 函数逻辑实现在函数 <code>__interceptor_isdigit</code> 中，并且将 <code>isdigit</code> 设置成 <code>__interceptor_isdigit</code> 的 alias 别名呢？</p><p>考虑如下场景：假设用户代码中也替换了 <code>isdigit</code> 函数的实现，添加了自己的逻辑，那么最终 dynamic loader 选择的是用户代码中的 <code>isdigit</code> 的实现，而不是 sanitizer runtime library 中的 <code>isdigit</code> 的实现，这样的话 sanitizer 的功能就不能正常工作了。（实际上 sanitizer runtime library 中并没有替换 <code>isdigit</code> 的实现，这里只是用 <code>isdigit</code> 举例子便于说明）。</p><p>但是如果我们在 sanitizer runtime library 中将 <code>isdigit</code> 设置成 <code>__interceptor_isdigit</code> 的 alias 别名，那么在用户代码中自己替换 <code>isdigit</code> 实现时就可以显示调用 <code>__interceptor_isdigit</code> 了。这样既不影响用户自行替换库函数，也不影响 sanitizer 功能的正确运行 ：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>extern</span> <span style=color:#e6db74>&#34;C&#34;</span> <span style=color:#66d9ef>int</span> __interceptor_isdigit(<span style=color:#66d9ef>int</span> d);
+</span></span><span style=display:flex><span><span style=color:#66d9ef>extern</span> <span style=color:#e6db74>&#34;C&#34;</span> <span style=color:#66d9ef>int</span> isdigit(<span style=color:#66d9ef>int</span> d) {
+</span></span><span style=display:flex><span>  fprintf(stderr, <span style=color:#e6db74>&#34;my_isdigit_interceptor</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>);
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> <span style=color:#a6e22e>__interceptor_isdigit</span>(d);
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>那在 sanitizer runtime library 中为什么将被替换的函数设置为 weak 呢？</p><p>这是因为如果不设置为 weak ，在静态链接 sanitizer runtime library 时就会因为 multiple definition 而链接失败。</p></li><li><p>接着我们看下 INTERCEPT_FUNCTION 宏做了哪些事情</p><p>INTERCEPT_FUNCTION 宏展开后就是对 __interception::InterceptFunction 函数的调用。<code>InterceptFunction</code> 函数的定义在 <a href=https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/interception_linux.cpp>https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/interception_linux.cpp</a>：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>namespace</span> __interception {
+</span></span><span style=display:flex><span><span style=color:#66d9ef>static</span> <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span><span style=color:#a6e22e>GetFuncAddr</span>(<span style=color:#66d9ef>const</span> <span style=color:#66d9ef>char</span> <span style=color:#f92672>*</span>name, uptr wrapper_addr) {
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>addr <span style=color:#f92672>=</span> dlsym(RTLD_NEXT, name);
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>addr) {
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// If the lookup using RTLD_NEXT failed, the sanitizer runtime library is
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// later in the library search order than the DSO that we are trying to
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// intercept, which means that we cannot intercept this function. We still
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// want the address of the real definition, though, so look it up using
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// RTLD_DEFAULT.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    addr <span style=color:#f92672>=</span> dlsym(RTLD_DEFAULT, name);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// In case `name&#39; is not loaded, dlsym ends up finding the actual wrapper.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// We don&#39;t want to intercept the wrapper and have it point to itself.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#66d9ef>if</span> ((uptr)addr <span style=color:#f92672>==</span> wrapper_addr)
+</span></span><span style=display:flex><span>      addr <span style=color:#f92672>=</span> <span style=color:#66d9ef>nullptr</span>;
+</span></span><span style=display:flex><span>  }
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> addr;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>bool</span> <span style=color:#a6e22e>InterceptFunction</span>(<span style=color:#66d9ef>const</span> <span style=color:#66d9ef>char</span> <span style=color:#f92672>*</span>name, uptr <span style=color:#f92672>*</span>ptr_to_real, uptr func,
+</span></span><span style=display:flex><span>                       uptr wrapper) {
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>addr <span style=color:#f92672>=</span> GetFuncAddr(name, wrapper);
+</span></span><span style=display:flex><span>  <span style=color:#f92672>*</span>ptr_to_real <span style=color:#f92672>=</span> (uptr)addr;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> addr <span style=color:#f92672>&amp;&amp;</span> (func <span style=color:#f92672>==</span> wrapper);
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>}  <span style=color:#75715e>// namespace __interception
+</span></span></span></code></pre></div><p>其实 <code>InterceptFunction</code> 函数的实现很简单：首先通过函数 <code>GetFuncAddr</code> 获得原本的名为 name 的函数地址，然后将该地址保存至指针 <code>ptr_to_real</code> 指向的内存。</p><p>函数 <code>GetFuncAddr</code> 的代码实现也很简单，核心就是 <a href=https://man7.org/linux/man-pages/man3/dlsym.3.html>dlsym</a>：</p><pre><code>RTLD_DEFAULT
     Find the first occurrence of the desired symbol using the
     default shared object search order.  The search will
     include global symbols in the executable and its
@@ -389,23 +177,7 @@ RTLD_NEXT
     another shared object (or for that matter, the &quot;next&quot;
     definition of the function in cases where there are
     multiple layers of preloading).
-</code></pre>
-<p>这也是为什么在函数 <code>GetFuncAddr</code> 中，先用 <code>dlsym(RTLD_NEXT, name)</code> 去寻找被 intercepted 函数的真实地址，因为 sanitizer runtime library 是先于 name 函数真正所在的 shared object。</p>
-</li>
-<li>
-<p>最后我们看下 DECLARE_REAL 宏 和 REAL 宏做了哪些事情</p>
-<p>DECLARE_REAL 展开后就是声明了在 __interception namespace 中存在一个指向被替换函数真正实现的函数指针，REAL 宏就是通过这个函数指针来调用被替换函数的真正实现。</p>
-<p>例如，在测试用例中，<code>DECLARE_REAL(int, isdigit, int);</code> 就是在声明 __interception namespace 中存在一个函数指针 <code>real_isdigit</code>，该函数指针指向真正的 <code>isdigit</code> 函数地址，通过 <code>REAL(isdigit)</code> 来调用真正的 <code>isdigit</code> 函数。</p>
-</li>
-</ul>
-<h2 id="ps">P.S.</h2>
-<p><code>__attribute__((alias))</code> 很有意思：</p>
-<blockquote>
-<p>Where a function is defined in the current translation unit, the alias call is replaced by a call to the function, and the alias is emitted alongside the original name. Where a function is not defined in the current translation unit, the alias call is replaced by a call to the real function. Where a function is defined as static, the function name is replaced by the alias name and the function is declared external if the alias name is declared external.</p>
-</blockquote>
-<p>在 ASan runtime library 中 malloc 是 weak 符号，并且 malloc 和 __interceptor_malloc 实际指向同一个地址。</p>
-<p>也就是说 <code>extern &quot;C&quot; void *malloc(size_t size) __attribute__((weak, alias(&quot;__interceptor_malloc&quot;), visibility(&quot;default&quot;)));</code> 使得在 ASan runtime library 中造了一个弱符号 malloc，然后指向的和 __interceptor_malloc 是同一个地址。</p>
-<pre tabindex="0"><code>$ readelf -sW --dyn-syms $(clang -print-file-name=libclang_rt.asan-x86_64.a) | grep malloc
+</code></pre><p>这也是为什么在函数 <code>GetFuncAddr</code> 中，先用 <code>dlsym(RTLD_NEXT, name)</code> 去寻找被 intercepted 函数的真实地址，因为 sanitizer runtime library 是先于 name 函数真正所在的 shared object。</p></li><li><p>最后我们看下 DECLARE_REAL 宏 和 REAL 宏做了哪些事情</p><p>DECLARE_REAL 展开后就是声明了在 __interception namespace 中存在一个指向被替换函数真正实现的函数指针，REAL 宏就是通过这个函数指针来调用被替换函数的真正实现。</p><p>例如，在测试用例中，<code>DECLARE_REAL(int, isdigit, int);</code> 就是在声明 __interception namespace 中存在一个函数指针 <code>real_isdigit</code>，该函数指针指向真正的 <code>isdigit</code> 函数地址，通过 <code>REAL(isdigit)</code> 来调用真正的 <code>isdigit</code> 函数。</p></li></ul><h2 id=ps>P.S.</h2><p><code>__attribute__((alias))</code> 很有意思：</p><blockquote><p>Where a function is defined in the current translation unit, the alias call is replaced by a call to the function, and the alias is emitted alongside the original name. Where a function is not defined in the current translation unit, the alias call is replaced by a call to the real function. Where a function is defined as static, the function name is replaced by the alias name and the function is declared external if the alias name is declared external.</p></blockquote><p>在 ASan runtime library 中 malloc 是 weak 符号，并且 malloc 和 __interceptor_malloc 实际指向同一个地址。</p><p>也就是说 <code>extern "C" void *malloc(size_t size) __attribute__((weak, alias("__interceptor_malloc"), visibility("default")));</code> 使得在 ASan runtime library 中造了一个弱符号 malloc，然后指向的和 __interceptor_malloc 是同一个地址。</p><pre tabindex=0><code>$ readelf -sW --dyn-syms $(clang -print-file-name=libclang_rt.asan-x86_64.a) | grep malloc
   ...
   99: 0000000000001150   606 FUNC    GLOBAL DEFAULT    3 __interceptor_malloc
   102: 0000000000001150   606 FUNC    WEAK   DEFAULT    3 malloc
@@ -414,135 +186,8 @@ $ readelf -sW --dyn-syms $(clang -print-file-name=libclang_rt.asan-x86_64.so) | 
   ...
   3008: 00000000000fd600   606 FUNC    WEAK   DEFAULT   12 malloc
   4519: 00000000000fd600   606 FUNC    GLOBAL DEFAULT   12 __interceptor_malloc
-</code></pre><h2 id="ps2">P.S.2</h2>
-<p>熟悉在 Linux 下 sanitizer interceptor 机制的底层原理后，就很容易明白使用 sanitizer 时遇到的一些问题或坑为什么会是这样的。例如：</p>
-<ul>
-<li>
-<p><a href="https://github.com/google/sanitizers/issues/611">Address Sanitizer fails to intercept function in shared library opened with RTLD_DEEPBIND · Issue #611 · google/sanitizers · GitHub</a></p>
-</li>
-<li>
-<p><a href="https://github.com/google/sanitizers/issues/796">ASan runtime does not come first in initial library list; you should either link runtime to your application or manually preload it with LD_PRELOAD. · Issue #796 · google/sanitizers · GitHub</a></p>
-</li>
-<li>
-<p><a href="https://stackoverflow.com/questions/66971217/is-it-okay-if-asan-runtime-loaded-as-second-library">address sanitizer - Is it okay if ASAN runtime loaded as second library? - Stack Overflow</a></p>
-</li>
-</ul>
-<h2 id="references">References</h2>
-<ol>
-<li>
-<p><a href="https://maskray.me/blog/2021-05-16-elf-interposition-and-bsymbolic">ELF interposition and -Bsymbolic | MaskRay</a></p>
-</li>
-<li>
-<p><a href="https://man7.org/linux/man-pages/man3/dlsym.3.html">dlsym(3) - Linux manual pagedlsym(3) - Linux manual page</a></p>
-</li>
-<li>
-<p><a href="https://github.com/llvm/llvm-project/commit/7fb7330469af52ae1313b2b47c273e62c61a4dd5">asan/tsan: weak interceptors · llvm/llvm-project@7fb7330 · GitHub</a></p>
-</li>
-</ol>
-		</div>
-		<footer class="post__footer">
-			
-<div class="post__tags tags clearfix">
-	<svg class="tags__badge icon icon-tag" width="16" height="16" viewBox="0 0 32 32"><path d="M32 19c0 1-1 2-1 2L21 31s-1 1-2 1-2-1-2-1L2 16c-1-1-1.4-2-1.4-2S0 12.5 0 11V3C0 1.5.8.8.8.8S1.5 0 3 0h8c1.5 0 3 .6 3 .6S15 1 16 2l15 15s1 1 1 2zM7 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/></svg>
-	<ul class="tags__list">
-		<li class="tags__item">
-			<a class="tags__link btn" href="/tags/sanitizer/" rel="tag">Sanitizer</a>
-		</li>
-		<li class="tags__item">
-			<a class="tags__link btn" href="/tags/llvm/" rel="tag">LLVM</a>
-		</li>
-	</ul>
-</div>
-		</footer>
-	</article>
-</main>
-
-
-
-
-			</div>
-			<aside class="sidebar"><div class="widget-search widget">
-	<form class="widget-search__form" role="search" method="get" action="https://google.com/search">
-		<label>
-			<input class="widget-search__field" type="search" placeholder="SEARCH…" value="" name="q" aria-label="SEARCH…">
-		</label>
-		<input class="widget-search__submit" type="submit" value="Search">
-		<input type="hidden" name="sitesearch" value="https://enna1.github.io/">
-	</form>
-</div>
-<div class="widget-recent widget">
-	<h4 class="widget__title">Recent Posts</h4>
-	<div class="widget__content">
-		<ul class="widget__list">
-			<li class="widget__item"><a class="widget__link" href="/post/howsanitizerinterceptorworks/">How Sanitizer Interceptor Works</a></li>
-			<li class="widget__item"><a class="widget__link" href="/post/howsanitizerruntimeinit/">How Sanitizer Runtime Initialized</a></li>
-			<li class="widget__item"><a class="widget__link" href="/post/dumbsanitizerhowto/">How To Write A Dumb Sanitizer</a></li>
-		</ul>
-	</div>
-</div>
-<div class="widget-categories widget">
-	<h4 class="widget__title">Categories</h4>
-	<div class="widget__content">
-		<ul class="widget__list">
-			<li class="widget__item">
-				<a class="widget__link" href="/categories/llvm/">LLVM</a></li>
-			<li class="widget__item">
-				<a class="widget__link" href="/categories/sanitizer/">Sanitizer</a></li>
-		</ul>
-	</div>
-</div>
-<div class="widget-taglist widget">
-	<h4 class="widget__title">Tags</h4>
-	<div class="widget__content">
-		<a class="widget-taglist__link widget__link btn" href="/tags/llvm/" title="LLVM">LLVM</a>
-		<a class="widget-taglist__link widget__link btn" href="/tags/sanitizer/" title="Sanitizer">Sanitizer</a>
-	</div>
-</div>
-<div class="widget-social widget">
-	<h4 class="widget-social__title widget__title">Social</h4>
-	<div class="widget-social__content widget__content">
-		<div class="widget-social__item widget__item">
-			<a class="widget-social__link widget__link btn" title="GitHub" rel="noopener noreferrer" href="https://github.com/Enna1" target="_blank">
-				<svg class="widget-social__link-icon icon icon-github" width="24" height="24" viewBox="0 0 384 374"><path d="m192 0c-106.1 0-192 85.8-192 191.7 0 84.7 55 156.6 131.3 181.9 9.6 1.8 13.1-4.2 13.1-9.2 0-4.6-.2-16.6-.3-32.6-53.4 11.6-64.7-25.7-64.7-25.7-8.7-22.1-21.3-28-21.3-28-17.4-11.9 1.3-11.6 1.3-11.6 19.3 1.4 29.4 19.8 29.4 19.8 17.1 29.3 44.9 20.8 55.9 15.9 1.7-12.4 6.7-20.8 12.2-25.6-42.6-4.8-87.5-21.3-87.5-94.8 0-20.9 7.5-38 19.8-51.4-2-4.9-8.6-24.3 1.9-50.7 0 0 16.1-5.2 52.8 19.7 15.3-4.2 31.7-6.4 48.1-6.5 16.3.1 32.7 2.2 48.1 6.5 36.7-24.8 52.8-19.7 52.8-19.7 10.5 26.4 3.9 45.9 1.9 50.7 12.3 13.4 19.7 30.5 19.7 51.4 0 73.7-44.9 89.9-87.7 94.6 6.9 5.9 13 17.6 13 35.5 0 25.6-.2 46.3-.2 52.6 0 5.1 3.5 11.1 13.2 9.2 76.2-25.5 131.2-97.3 131.2-182 0-105.9-86-191.7-192-191.7z"/></svg>
-				<span>GitHub</span>
-			</a>
-		</div>
-		<div class="widget-social__item widget__item">
-			<a class="widget-social__link widget__link btn" title="Email" href="mailto:xumingjie.enna1@bytedance.com">
-				<svg class="widget-social__link-icon icon icon-mail" width="24" height="24" viewBox="0 0 416 288"><path d="m0 16v256 16h16 384 16v-16-256-16h-16-384-16zm347 16-139 92.5-139-92.5zm-148 125.5 9 5.5 9-5.5 167-111.5v210h-352v-210z"/></svg>
-				<span>xumingjie.enna1@bytedance.com</span>
-			</a>
-		</div>
-
-		
-		<div class="widget-social__item widget__item">
-			<a class="widget-social__link widget__link btn" title="Blog RSS" rel="noopener noreferrer" href="/post/index.xml" target="_blank">
-					<svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328 0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765 0 183.105 0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686 0 38.981 0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg>
-				<span>Blog RSS</span>
-			</a>
-		</div>
-		
-		<div class="widget-social__item widget__item">
-			<a class="widget-social__link widget__link btn" title="Podcast RSS" rel="noopener noreferrer" href="/podcast/index.xml" target="_blank">
-					<svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328 0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765 0 183.105 0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686 0 38.981 0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg>
-				<span>Podcast RSS</span>
-			</a>
-		</div>
-		
-	</div>
-</div>
-</aside>
-		</div>
-		<footer class="footer">
-	<div class="container footer__container flex">
-		
-		<div class="footer__copyright">
-			&copy; 2022 Enna1.
-			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
-		</div>
-	</div>
-</footer>
-	</div>
-<script async defer src="/js/menu.js"></script>
-</body>
-</html>
+</code></pre><h2 id=ps2>P.S.2</h2><p>熟悉在 Linux 下 sanitizer interceptor 机制的底层原理后，就很容易明白使用 sanitizer 时遇到的一些问题或坑为什么会是这样的。例如：</p><ul><li><p><a href=https://github.com/google/sanitizers/issues/611>Address Sanitizer fails to intercept function in shared library opened with RTLD_DEEPBIND · Issue #611 · google/sanitizers · GitHub</a></p></li><li><p><a href=https://github.com/google/sanitizers/issues/796>ASan runtime does not come first in initial library list; you should either link runtime to your application or manually preload it with LD_PRELOAD. · Issue #796 · google/sanitizers · GitHub</a></p></li><li><p><a href=https://stackoverflow.com/questions/66971217/is-it-okay-if-asan-runtime-loaded-as-second-library>address sanitizer - Is it okay if ASAN runtime loaded as second library? - Stack Overflow</a></p></li></ul><h2 id=references>References</h2><ol><li><p><a href=https://maskray.me/blog/2021-05-16-elf-interposition-and-bsymbolic>ELF interposition and -Bsymbolic | MaskRay</a></p></li><li><p><a href=https://man7.org/linux/man-pages/man3/dlsym.3.html>dlsym(3) - Linux manual pagedlsym(3) - Linux manual page</a></p></li><li><p><a href=https://github.com/llvm/llvm-project/commit/7fb7330469af52ae1313b2b47c273e62c61a4dd5>asan/tsan: weak interceptors · llvm/llvm-project@7fb7330 · GitHub</a></p></li></ol></div><footer class=post__footer><div class="post__tags tags clearfix"><svg class="tags__badge icon icon-tag" width="16" height="16" viewBox="0 0 32 32"><path d="M32 19c0 1-1 2-1 2L21 31s-1 1-2 1-2-1-2-1L2 16c-1-1-1.4-2-1.4-2S0 12.5.0 11V3C0 1.5.8.8.8.8S1.5.0 3 0h8c1.5.0 3 .6 3 .6S15 1 16 2l15 15s1 1 1 2zM7 10a3 3 0 100-6 3 3 0 000 6z"/></svg><ul class=tags__list><li class=tags__item><a class="tags__link btn" href=/tags/sanitizer/ rel=tag>Sanitizer</a></li><li class=tags__item><a class="tags__link btn" href=/tags/llvm/ rel=tag>LLVM</a></li></ul></div></footer></article></main></div><aside class=sidebar><div class="widget-search widget"><form class=widget-search__form role=search method=get action=https://google.com/search><label><input class=widget-search__field type=search placeholder=SEARCH… name=q aria-label=SEARCH…></label>
+<input class=widget-search__submit type=submit value=Search>
+<input type=hidden name=sitesearch value=https://enna1.github.io/></form></div><div class="widget-recent widget"><h4 class=widget__title>Recent Posts</h4><div class=widget__content><ul class=widget__list><li class=widget__item><a class=widget__link href=/post/howsanitizerinterceptorworks/>How Sanitizer Interceptor Works</a></li><li class=widget__item><a class=widget__link href=/post/howsanitizerruntimeinit/>How Sanitizer Runtime Initialized</a></li><li class=widget__item><a class=widget__link href=/post/dumbsanitizerhowto/>How To Write A Dumb Sanitizer</a></li></ul></div></div><div class="widget-categories widget"><h4 class=widget__title>Categories</h4><div class=widget__content><ul class=widget__list><li class=widget__item><a class=widget__link href=/categories/llvm/>LLVM</a></li><li class=widget__item><a class=widget__link href=/categories/sanitizer/>Sanitizer</a></li></ul></div></div><div class="widget-taglist widget"><h4 class=widget__title>Tags</h4><div class=widget__content><a class="widget-taglist__link widget__link btn" href=/tags/llvm/ title=LLVM>LLVM</a>
+<a class="widget-taglist__link widget__link btn" href=/tags/sanitizer/ title=Sanitizer>Sanitizer</a></div></div><div class="widget-social widget"><h4 class="widget-social__title widget__title">Social</h4><div class="widget-social__content widget__content"><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title=GitHub rel="noopener noreferrer" href=https://github.com/Enna1 target=_blank><svg class="widget-social__link-icon icon icon-github" width="24" height="24" viewBox="0 0 384 374"><path d="m192 0C85.9.0.0 85.8.0 191.7c0 84.7 55 156.6 131.3 181.9 9.6 1.8 13.1-4.2 13.1-9.2.0-4.6-.2-16.6-.3-32.6-53.4 11.6-64.7-25.7-64.7-25.7-8.7-22.1-21.3-28-21.3-28-17.4-11.9 1.3-11.6 1.3-11.6 19.3 1.4 29.4 19.8 29.4 19.8 17.1 29.3 44.9 20.8 55.9 15.9 1.7-12.4 6.7-20.8 12.2-25.6-42.6-4.8-87.5-21.3-87.5-94.8.0-20.9 7.5-38 19.8-51.4-2-4.9-8.6-24.3 1.9-50.7.0.0 16.1-5.2 52.8 19.7 15.3-4.2 31.7-6.4 48.1-6.5 16.3.1 32.7 2.2 48.1 6.5 36.7-24.8 52.8-19.7 52.8-19.7 10.5 26.4 3.9 45.9 1.9 50.7 12.3 13.4 19.7 30.5 19.7 51.4.0 73.7-44.9 89.9-87.7 94.6 6.9 5.9 13 17.6 13 35.5.0 25.6-.2 46.3-.2 52.6.0 5.1 3.5 11.1 13.2 9.2C329 348.2 384 276.4 384 191.7 384 85.8 298 0 192 0z"/></svg><span>GitHub</span></a></div><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title=Email href=mailto:xumingjie.enna1@bytedance.com><svg class="widget-social__link-icon icon icon-mail" width="24" height="24" viewBox="0 0 416 288"><path d="m0 16v256 16h16 384 16v-16V16 0h-16H16 0zm347 16-139 92.5L69 32zM199 157.5l9 5.5 9-5.5L384 46v210H32V46z"/></svg><span>xumingjie.enna1@bytedance.com</span></a></div><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title="Blog RSS" rel="noopener noreferrer" href=/post/index.xml target=_blank><svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328.0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765.0 183.105.0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686.0 38.981.0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg><span>Blog RSS</span></a></div><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title="Podcast RSS" rel="noopener noreferrer" href=/podcast/index.xml target=_blank><svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328.0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765.0 183.105.0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686.0 38.981.0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg><span>Podcast RSS</span></a></div></div></div></aside></div><footer class=footer><div class="container footer__container flex"><div class=footer__copyright>&copy; 2022 Enna1.
+<span class=footer__copyright-credits>Generated with <a href=https://gohugo.io/ rel="nofollow noopener" target=_blank>Hugo</a> and <a href=https://github.com/Vimux/Mainroad/ rel="nofollow noopener" target=_blank>Mainroad</a> theme.</span></div></div></footer></div><script async defer src=/js/menu.js></script></body></html>

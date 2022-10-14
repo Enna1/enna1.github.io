@@ -1,879 +1,836 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
-  <channel>
-    <title>Blog section  Enna1&#39;s blog</title>
-    <link>https://enna1.github.io/post/</link>
-    <description>  Blog section  Enna1&#39;s blog</description>
-    <generator>Hugo -- gohugo.io</generator>
-    <language>en-us</language>
-    <lastBuildDate>Sun, 18 Sep 2022 00:00:00 +0000</lastBuildDate>
-    <atom:link href="https://enna1.github.io/post/index.xml" rel="self" type="application/rss+xml" />
-    
-    <item>
-      <title>How Sanitizer Interceptor Works</title>
-      <link>https://enna1.github.io/post/howsanitizerinterceptorworks/</link>
-      <pubDate>Sun, 18 Sep 2022 00:00:00 +0000</pubDate>
-      <guid>https://enna1.github.io/post/howsanitizerinterceptorworks/</guid>
-      <description>&lt;p&gt;本文分析了 sanitizer 是如何做到替换 malloc, free, memcpy 这些库函数的实现的。即 sanitizer 中的 interceptor 机制。&lt;/p&gt;
-&lt;p&gt;我们在前面的文章中提到，所有的 Sanitizer 都由编译时插桩 (compile-time instrumentation) 和运行时库 (run-time library) 两部分组成。&lt;/p&gt;
-&lt;p&gt;那么 sanitizer 的运行时库中做了哪些事情呢？&lt;/p&gt;
-&lt;p&gt;以 ASan 为例：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;ASan 编译时会在每一处内存读写语句之前插入代码，根据每一次访问的内存所对应的影子内存 ( shadow memory，就是使用额外的内存记录常规内存的状态）的状态来检测本次内存访问是否合法。还会在栈变量和全局变量附近申请额外内存作为危险区用于检测内存溢出。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;ASan 运行时库中最主要的就是替换了 malloc/free, new/delete 的实现，这样应用程序的内存分配都由 ASan 实现的内存分配器负责。ASan 内存分配器会在它分配的堆内存附近申请额外内存用于检测堆内存溢出，还会将被释放的内存优先放在隔离区 (quarantine) 用于检测像 heap-use-after-free, double-free 这样的堆内存错误。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;ASan 运行时库中实际上不止替换了 malloc/free, new/delete 的函数实现，还替换了非常多的库函数的实现，如：memcpy, memmove, strcpy, strcat, pthread_create 等。&lt;/p&gt;
-&lt;p&gt;那么 sanitizer 是如何做到替换 malloc, free, memcpy 这些函数实现的呢？答案就是 sanitizer 中的 interceptor 机制。&lt;/p&gt;
-&lt;p&gt;本文以 ASan 为例，分析在 Linux x86_64 环境下 sanitizer interceptor 的实现原理。&lt;/p&gt;
-&lt;h2 id=&#34;symbol-interposition&#34;&gt;Symbol interposition&lt;/h2&gt;
-&lt;p&gt;在讲解 sanitizer interceptor 的实现原理之前，我们先来了解一下前置知识：symbol interposition。&lt;/p&gt;
-&lt;p&gt;首先我们考虑这样一个问题：如何在我们的应用程序中替换 libc 的 malloc 实现为我们自己实现的版本？&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;
-&lt;p&gt;一个最简单的方式就是在我们的应用程序中定义一个同名的 malloc 函数&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;还有一种方式就是将我们的 malloc 函数实现在 libmymalloc.so 中，然后在运行我们的应用程序之前设置环境变量 &lt;code&gt;LD_PRELOAD=/path/to/libmymalloc.so&lt;/code&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;那么为什么上述两种方式能生效呢？答案是 symbol interposition。&lt;/p&gt;
-&lt;p&gt;&lt;a href=&#34;http://www.sco.com/developers/gabi/latest/contents.html&#34;&gt;ELF specfication&lt;/a&gt; 在第五章 Program Loading and Dynamic Linking 中提到：&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;When resolving symbolic references, the dynamic linker examines the symbol tables with a breadth-first search. That is, it first looks at the symbol table of the executable program itself, then at the symbol tables of the &lt;code&gt;DT_NEEDED&lt;/code&gt; entries (in order), and then at the second level &lt;code&gt;DT_NEEDED&lt;/code&gt; entries, and so on.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;动态链接器 (dynamic linker/loader) 在符号引用绑定 (binding symbol references) 时，以一种广度优先搜索的顺序来查找符号：executable, needed0.so, needed1.so, needed2.so, needed0_of_needed0.so, needed1_of_needed0.so, &amp;hellip;&lt;/p&gt;
-&lt;p&gt;如果设置了 LD_PRELOAD，那么查找符号的顺序会变为：executable, preload0.so, preload1.so needed0.so, needed1.so, needed2.so, needed0_of_needed0.so, needed1_of_needed0.so, &amp;hellip;&lt;/p&gt;
-&lt;p&gt;如果一个符号在多个组件（executable 或 shared object）中都存在定义，那么动态链接器会选择它所看到的第一个定义。&lt;/p&gt;
-&lt;p&gt;我们通过一个例子来理解该过程：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; cat main.c
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; W(), X();
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;main&lt;/span&gt;() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (W() &lt;span style=&#34;color:#f92672&#34;&gt;+&lt;/span&gt; X()); }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; cat W.c
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; b();
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;a&lt;/span&gt;() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (&lt;span style=&#34;color:#ae81ff&#34;&gt;1&lt;/span&gt;); }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;W&lt;/span&gt;() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (a() &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt; b()); }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; cat w.c
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; b() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (&lt;span style=&#34;color:#ae81ff&#34;&gt;2&lt;/span&gt;); }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; cat X.c
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; b();
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;a&lt;/span&gt;() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (&lt;span style=&#34;color:#ae81ff&#34;&gt;3&lt;/span&gt;); }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;X&lt;/span&gt;() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (a() &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt; b()); }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; cat x.c
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; b() { &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; (&lt;span style=&#34;color:#ae81ff&#34;&gt;4&lt;/span&gt;); }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; gcc &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;o libw.so &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;shared w.c
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; gcc &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;o libW.so &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;shared W.c &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;L. &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;lw &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;Wl,&lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;rpath&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;.
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; gcc &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;o libx.so &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;shared x.c
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; gcc &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;o libX.so &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;shared X.c &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;L. &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;lx &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;Wl,&lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;rpath&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;.
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#960050;background-color:#1e0010&#34;&gt;$&lt;/span&gt; gcc &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;o test&lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;symbind main.c &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;L. &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;lW &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;lX &lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;Wl,&lt;span style=&#34;color:#f92672&#34;&gt;-&lt;/span&gt;rpath&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;.
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;该例子中可执行文件与动态库之间的依赖关系如下图所示：&lt;/p&gt;
-&lt;p&gt;&lt;img src=&#34;https://enna1.github.io/blog/sanitizer-interceptor/2022-10-02-20-18-44-image.png&#34; alt=&#34;&#34;&gt;&lt;/p&gt;
-&lt;p&gt;按照我们前面所说，本例中动态链接器在进行符号引用绑定时，是按照广度优先搜索的顺序，即：test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的。&lt;/p&gt;
-&lt;p&gt;动态链接器提供了环境变量 LD_DEBUG 来输出一些调试信息，我们可以通过设置环境变量 LD_DEBUG=&amp;ldquo;symbols:bindings&amp;rdquo; 看下 test-symbind 的 symbol binding 的过程：&lt;/p&gt;
-&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;$ LD_DEBUG=&amp;#34;symbols:bindings&amp;#34; ./test-symbind
-   1884890:        symbol=a;  lookup in file=./test-symbind [0]
-   1884890:        symbol=a;  lookup in file=./libW.so [0]
-   1884890:        binding file ./libW.so [0] to ./libW.so [0]: normal symbol `a&amp;#39;
-   1884890:        symbol=b;  lookup in file=./test-symbind [0]
-   1884890:        symbol=b;  lookup in file=./libW.so [0]
-   1884890:        symbol=b;  lookup in file=./libX.so [0]
-   1884890:        symbol=b;  lookup in file=/lib/x86_64-linux-gnu/libc.so.6 [0]
-   1884890:        symbol=b;  lookup in file=./libw.so [0]
-   1884890:        binding file ./libW.so [0] to ./libw.so [0]: normal symbol `b&amp;#39;
-   1884890:        symbol=a;  lookup in file=./test-symbind [0]
-   1884890:        symbol=a;  lookup in file=./libW.so [0]
-   1884890:        binding file ./libX.so [0] to ./libW.so [0]: normal symbol `a&amp;#39;
-   1884890:        symbol=b;  lookup in file=./test-symbind [0]
-   1884890:        symbol=b;  lookup in file=./libW.so [0]
-   1884890:        symbol=b;  lookup in file=./libX.so [0]
-   1884890:        symbol=b;  lookup in file=/lib/x86_64-linux-gnu/libc.so.6 [0]
-   1884890:        symbol=b;  lookup in file=./libw.so [0]
-   1884890:        binding file ./libX.so [0] to ./libw.so [0]: normal symbol `b&amp;#39;
-&lt;/code&gt;&lt;/pre&gt;&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;函数 a 在 libW.so 和 libX.so 中都有一份定义，但因为是按照 test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的，所以最终所有对函数 a 的引用都绑定到 libW.so 中函数 a 的实现&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;函数 b 在 libw.so 和 libx.so 中都有一份定义，但因为是按照 test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的，所以最终所有对函数 b 的引用都绑定到 libw.so 中函数 b 的实现&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;hr&gt;
-&lt;p&gt;这样我们就理解为什么上述两种替换 malloc 的方式能生效了：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;方式一：在我们的应用程序中定义一个同名的 malloc 函数。动态链接器在查找符号时 executable 的顺序在 libc.so 之前，因此所有对 malloc 的引用都会绑定到 executable 中 malloc 的实现。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;方式二：将我们的 malloc 函数实现在 libmymalloc.so 中，然后在运行我们的应用程序之前设置环境变量 LD_PRELOAD=/path/to/libmymalloc.so。动态链接器在查找符号时 libmymalloc.so 的顺序在 libc.so 之前，因此所有对 malloc 的引用都会绑定到 libmymalloc.so 中 malloc 的实现。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;hr&gt;
-&lt;p&gt;实际上 sanitizer 对于 malloc/free 等库函数的替换正是利用了 symbol interposition 这一特性。下面我们以 ASan 为例来验证一下。&lt;/p&gt;
-&lt;p&gt;考虑如下代码：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// test.cpp
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;#include&lt;/span&gt; &lt;span style=&#34;color:#75715e&#34;&gt;&amp;lt;iostream&amp;gt;&lt;/span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;main&lt;/span&gt;() {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    std&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;cout &lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;Hello AddressSanitizer!&lt;/span&gt;&lt;span style=&#34;color:#ae81ff&#34;&gt;\n&lt;/span&gt;&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;我们首先看下 GCC 的行为。&lt;/p&gt;
-&lt;p&gt;使用 GCC 开启 ASan 编译 test.cpp ，&lt;code&gt;g++ -fsanitize=address test.cpp -o test-gcc-asan&lt;/code&gt; 得到编译产物 test-gcc-asan。因为 GCC 默认会&lt;strong&gt;动态链接&lt;/strong&gt; ASan 运行时库，所以我们可以使用 &lt;code&gt;objdump -p test-gcc-asan | grep NEEDED&lt;/code&gt; 查看 test-gcc-asan 依赖的动态库 (shared objects)：&lt;/p&gt;
-&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;$ objdump -p test-gcc-asan | grep NEEDED
-  NEEDED               libasan.so.5
-  NEEDED               libstdc++.so.6
-  NEEDED               libm.so.6
-  NEEDED               libgcc_s.so.1
-  NEEDED               libc.so.6
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;可以清楚的看到在 test-gcc-asan 依赖的动态库中 libasan.so 的顺序是在 libc.so 之前的。实际上链接时参数 &lt;code&gt;-fsanitize=address&lt;/code&gt; 会使得 libasan.so 成为程序的第一个依赖库。&lt;/p&gt;
-&lt;p&gt;然后我们再通过环境变量 LD_DEBUG 看下 test-gcc-asan 的 symbol bindding 的过程：&lt;/p&gt;
-&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;$ LD_DEBUG=&amp;#34;bindings&amp;#34; ./test-gcc-asan
-   3309213:        binding file /lib/x86_64-linux-gnu/libc.so.6 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
-   3309213:        binding file /lib64/ld-linux-x86-64.so.2 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
-   3309213:        binding file /usr/lib/x86_64-linux-gnu/libstdc++.so.6 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;可以看到动态链接器将 libc.so, ld-linux-x86-64.so 和 libstdc++.so 中对 malloc 的引用都绑定到了 libasan.so 中的 malloc 实现。&lt;/p&gt;
-&lt;hr&gt;
-&lt;p&gt;下面我们看下 Clang，因为 Clang 默认是&lt;strong&gt;静态链接&lt;/strong&gt; ASan 运行时库，所以我们就不看 test-clang-asan 所依赖的动态库了，直接看 symbol binding 的过程：&lt;/p&gt;
-&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;$ clang++ -fsanitize=address test.cpp -o test-clang-asan
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Blog section Enna1's blog</title><link>https://enna1.github.io/post/</link><description> Blog section Enna1's blog</description><generator>Hugo -- gohugo.io</generator><language>en-us</language><lastBuildDate>Sun, 18 Sep 2022 00:00:00 +0000</lastBuildDate><atom:link href="https://enna1.github.io/post/index.xml" rel="self" type="application/rss+xml"/><item><title>How Sanitizer Interceptor Works</title><link>https://enna1.github.io/post/howsanitizerinterceptorworks/</link><pubDate>Sun, 18 Sep 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/howsanitizerinterceptorworks/</guid><description>&lt;p>本文分析了 sanitizer 是如何做到替换 malloc, free, memcpy 这些库函数的实现的。即 sanitizer 中的 interceptor 机制。&lt;/p>
+&lt;p>我们在前面的文章中提到，所有的 Sanitizer 都由编译时插桩 (compile-time instrumentation) 和运行时库 (run-time library) 两部分组成。&lt;/p>
+&lt;p>那么 sanitizer 的运行时库中做了哪些事情呢？&lt;/p>
+&lt;p>以 ASan 为例：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>ASan 编译时会在每一处内存读写语句之前插入代码，根据每一次访问的内存所对应的影子内存 ( shadow memory，就是使用额外的内存记录常规内存的状态）的状态来检测本次内存访问是否合法。还会在栈变量和全局变量附近申请额外内存作为危险区用于检测内存溢出。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>ASan 运行时库中最主要的就是替换了 malloc/free, new/delete 的实现，这样应用程序的内存分配都由 ASan 实现的内存分配器负责。ASan 内存分配器会在它分配的堆内存附近申请额外内存用于检测堆内存溢出，还会将被释放的内存优先放在隔离区 (quarantine) 用于检测像 heap-use-after-free, double-free 这样的堆内存错误。&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>ASan 运行时库中实际上不止替换了 malloc/free, new/delete 的函数实现，还替换了非常多的库函数的实现，如：memcpy, memmove, strcpy, strcat, pthread_create 等。&lt;/p>
+&lt;p>那么 sanitizer 是如何做到替换 malloc, free, memcpy 这些函数实现的呢？答案就是 sanitizer 中的 interceptor 机制。&lt;/p>
+&lt;p>本文以 ASan 为例，分析在 Linux x86_64 环境下 sanitizer interceptor 的实现原理。&lt;/p>
+&lt;h2 id="symbol-interposition">Symbol interposition&lt;/h2>
+&lt;p>在讲解 sanitizer interceptor 的实现原理之前，我们先来了解一下前置知识：symbol interposition。&lt;/p>
+&lt;p>首先我们考虑这样一个问题：如何在我们的应用程序中替换 libc 的 malloc 实现为我们自己实现的版本？&lt;/p>
+&lt;ol>
+&lt;li>
+&lt;p>一个最简单的方式就是在我们的应用程序中定义一个同名的 malloc 函数&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>还有一种方式就是将我们的 malloc 函数实现在 libmymalloc.so 中，然后在运行我们的应用程序之前设置环境变量 &lt;code>LD_PRELOAD=/path/to/libmymalloc.so&lt;/code>&lt;/p>
+&lt;/li>
+&lt;/ol>
+&lt;p>那么为什么上述两种方式能生效呢？答案是 symbol interposition。&lt;/p>
+&lt;p>&lt;a href="http://www.sco.com/developers/gabi/latest/contents.html">ELF specfication&lt;/a> 在第五章 Program Loading and Dynamic Linking 中提到：&lt;/p>
+&lt;blockquote>
+&lt;p>When resolving symbolic references, the dynamic linker examines the symbol tables with a breadth-first search. That is, it first looks at the symbol table of the executable program itself, then at the symbol tables of the &lt;code>DT_NEEDED&lt;/code> entries (in order), and then at the second level &lt;code>DT_NEEDED&lt;/code> entries, and so on.&lt;/p>
+&lt;/blockquote>
+&lt;p>动态链接器 (dynamic linker/loader) 在符号引用绑定 (binding symbol references) 时，以一种广度优先搜索的顺序来查找符号：executable, needed0.so, needed1.so, needed2.so, needed0_of_needed0.so, needed1_of_needed0.so, &amp;hellip;&lt;/p>
+&lt;p>如果设置了 LD_PRELOAD，那么查找符号的顺序会变为：executable, preload0.so, preload1.so needed0.so, needed1.so, needed2.so, needed0_of_needed0.so, needed1_of_needed0.so, &amp;hellip;&lt;/p>
+&lt;p>如果一个符号在多个组件（executable 或 shared object）中都存在定义，那么动态链接器会选择它所看到的第一个定义。&lt;/p>
+&lt;p>我们通过一个例子来理解该过程：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#960050;background-color:#1e0010">$&lt;/span> cat main.c
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">extern&lt;/span> &lt;span style="color:#66d9ef">int&lt;/span> W(), X();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#a6e22e">main&lt;/span>() { &lt;span style="color:#66d9ef">return&lt;/span> (W() &lt;span style="color:#f92672">+&lt;/span> X()); }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#960050;background-color:#1e0010">$&lt;/span> cat W.c
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">extern&lt;/span> &lt;span style="color:#66d9ef">int&lt;/span> b();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#a6e22e">a&lt;/span>() { &lt;span style="color:#66d9ef">return&lt;/span> (&lt;span style="color:#ae81ff">1&lt;/span>); }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#a6e22e">W&lt;/span>() { &lt;span style="color:#66d9ef">return&lt;/span> (a() &lt;span style="color:#f92672">-&lt;/span> b()); }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#960050;background-color:#1e0010">$&lt;/span> cat w.c
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> b() { &lt;span style="color:#66d9ef">return&lt;/span> (&lt;span style="color:#ae81ff">2&lt;/span>); }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#960050;background-color:#1e0010">$&lt;/span> cat X.c
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">extern&lt;/span> &lt;span style="color:#66d9ef">int&lt;/span> b();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#a6e22e">a&lt;/span>() { &lt;span style="color:#66d9ef">return&lt;/span> (&lt;span style="color:#ae81ff">3&lt;/span>); }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#a6e22e">X&lt;/span>() { &lt;span style="color:#66d9ef">return&lt;/span> (a() &lt;span style="color:#f92672">-&lt;/span> b()); }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#960050;background-color:#1e0010">$&lt;/span> cat x.c
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> b() { &lt;span style="color:#66d9ef">return&lt;/span> (&lt;span style="color:#ae81ff">4&lt;/span>); }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#960050;background-color:#1e0010">$&lt;/span> gcc &lt;span style="color:#f92672">-&lt;/span>o libw.so &lt;span style="color:#f92672">-&lt;/span>shared w.c
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#960050;background-color:#1e0010">$&lt;/span> gcc &lt;span style="color:#f92672">-&lt;/span>o libW.so &lt;span style="color:#f92672">-&lt;/span>shared W.c &lt;span style="color:#f92672">-&lt;/span>L. &lt;span style="color:#f92672">-&lt;/span>lw &lt;span style="color:#f92672">-&lt;/span>Wl,&lt;span style="color:#f92672">-&lt;/span>rpath&lt;span style="color:#f92672">=&lt;/span>.
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#960050;background-color:#1e0010">$&lt;/span> gcc &lt;span style="color:#f92672">-&lt;/span>o libx.so &lt;span style="color:#f92672">-&lt;/span>shared x.c
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#960050;background-color:#1e0010">$&lt;/span> gcc &lt;span style="color:#f92672">-&lt;/span>o libX.so &lt;span style="color:#f92672">-&lt;/span>shared X.c &lt;span style="color:#f92672">-&lt;/span>L. &lt;span style="color:#f92672">-&lt;/span>lx &lt;span style="color:#f92672">-&lt;/span>Wl,&lt;span style="color:#f92672">-&lt;/span>rpath&lt;span style="color:#f92672">=&lt;/span>.
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#960050;background-color:#1e0010">$&lt;/span> gcc &lt;span style="color:#f92672">-&lt;/span>o test&lt;span style="color:#f92672">-&lt;/span>symbind main.c &lt;span style="color:#f92672">-&lt;/span>L. &lt;span style="color:#f92672">-&lt;/span>lW &lt;span style="color:#f92672">-&lt;/span>lX &lt;span style="color:#f92672">-&lt;/span>Wl,&lt;span style="color:#f92672">-&lt;/span>rpath&lt;span style="color:#f92672">=&lt;/span>.
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>该例子中可执行文件与动态库之间的依赖关系如下图所示：&lt;/p>
+&lt;p>&lt;img src="https://enna1.github.io/blog/sanitizer-interceptor/2022-10-02-20-18-44-image.png" alt="">&lt;/p>
+&lt;p>按照我们前面所说，本例中动态链接器在进行符号引用绑定时，是按照广度优先搜索的顺序，即：test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的。&lt;/p>
+&lt;p>动态链接器提供了环境变量 LD_DEBUG 来输出一些调试信息，我们可以通过设置环境变量 LD_DEBUG=&amp;ldquo;symbols:bindings&amp;rdquo; 看下 test-symbind 的 symbol binding 的过程：&lt;/p>
+&lt;pre tabindex="0">&lt;code>$ LD_DEBUG=&amp;#34;symbols:bindings&amp;#34; ./test-symbind
+1884890: symbol=a; lookup in file=./test-symbind [0]
+1884890: symbol=a; lookup in file=./libW.so [0]
+1884890: binding file ./libW.so [0] to ./libW.so [0]: normal symbol `a&amp;#39;
+1884890: symbol=b; lookup in file=./test-symbind [0]
+1884890: symbol=b; lookup in file=./libW.so [0]
+1884890: symbol=b; lookup in file=./libX.so [0]
+1884890: symbol=b; lookup in file=/lib/x86_64-linux-gnu/libc.so.6 [0]
+1884890: symbol=b; lookup in file=./libw.so [0]
+1884890: binding file ./libW.so [0] to ./libw.so [0]: normal symbol `b&amp;#39;
+1884890: symbol=a; lookup in file=./test-symbind [0]
+1884890: symbol=a; lookup in file=./libW.so [0]
+1884890: binding file ./libX.so [0] to ./libW.so [0]: normal symbol `a&amp;#39;
+1884890: symbol=b; lookup in file=./test-symbind [0]
+1884890: symbol=b; lookup in file=./libW.so [0]
+1884890: symbol=b; lookup in file=./libX.so [0]
+1884890: symbol=b; lookup in file=/lib/x86_64-linux-gnu/libc.so.6 [0]
+1884890: symbol=b; lookup in file=./libw.so [0]
+1884890: binding file ./libX.so [0] to ./libw.so [0]: normal symbol `b&amp;#39;
+&lt;/code>&lt;/pre>&lt;ul>
+&lt;li>
+&lt;p>函数 a 在 libW.so 和 libX.so 中都有一份定义，但因为是按照 test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的，所以最终所有对函数 a 的引用都绑定到 libW.so 中函数 a 的实现&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>函数 b 在 libw.so 和 libx.so 中都有一份定义，但因为是按照 test-symbind, libW.so, libX.so, libc.so, libw.so, libx.so 的顺序查找符号定义的，所以最终所有对函数 b 的引用都绑定到 libw.so 中函数 b 的实现&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;hr>
+&lt;p>这样我们就理解为什么上述两种替换 malloc 的方式能生效了：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>方式一：在我们的应用程序中定义一个同名的 malloc 函数。动态链接器在查找符号时 executable 的顺序在 libc.so 之前，因此所有对 malloc 的引用都会绑定到 executable 中 malloc 的实现。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>方式二：将我们的 malloc 函数实现在 libmymalloc.so 中，然后在运行我们的应用程序之前设置环境变量 LD_PRELOAD=/path/to/libmymalloc.so。动态链接器在查找符号时 libmymalloc.so 的顺序在 libc.so 之前，因此所有对 malloc 的引用都会绑定到 libmymalloc.so 中 malloc 的实现。&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;hr>
+&lt;p>实际上 sanitizer 对于 malloc/free 等库函数的替换正是利用了 symbol interposition 这一特性。下面我们以 ASan 为例来验证一下。&lt;/p>
+&lt;p>考虑如下代码：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// test.cpp
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>&lt;span style="color:#75715e">#include&lt;/span> &lt;span style="color:#75715e">&amp;lt;iostream&amp;gt;&lt;/span>&lt;span style="color:#75715e">
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>&lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#a6e22e">main&lt;/span>() {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> std&lt;span style="color:#f92672">::&lt;/span>cout &lt;span style="color:#f92672">&amp;lt;&amp;lt;&lt;/span> &lt;span style="color:#e6db74">&amp;#34;Hello AddressSanitizer!&lt;/span>&lt;span style="color:#ae81ff">\n&lt;/span>&lt;span style="color:#e6db74">&amp;#34;&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>我们首先看下 GCC 的行为。&lt;/p>
+&lt;p>使用 GCC 开启 ASan 编译 test.cpp ，&lt;code>g++ -fsanitize=address test.cpp -o test-gcc-asan&lt;/code> 得到编译产物 test-gcc-asan。因为 GCC 默认会&lt;strong>动态链接&lt;/strong> ASan 运行时库，所以我们可以使用 &lt;code>objdump -p test-gcc-asan | grep NEEDED&lt;/code> 查看 test-gcc-asan 依赖的动态库 (shared objects)：&lt;/p>
+&lt;pre tabindex="0">&lt;code>$ objdump -p test-gcc-asan | grep NEEDED
+NEEDED libasan.so.5
+NEEDED libstdc++.so.6
+NEEDED libm.so.6
+NEEDED libgcc_s.so.1
+NEEDED libc.so.6
+&lt;/code>&lt;/pre>&lt;p>可以清楚的看到在 test-gcc-asan 依赖的动态库中 libasan.so 的顺序是在 libc.so 之前的。实际上链接时参数 &lt;code>-fsanitize=address&lt;/code> 会使得 libasan.so 成为程序的第一个依赖库。&lt;/p>
+&lt;p>然后我们再通过环境变量 LD_DEBUG 看下 test-gcc-asan 的 symbol bindding 的过程：&lt;/p>
+&lt;pre tabindex="0">&lt;code>$ LD_DEBUG=&amp;#34;bindings&amp;#34; ./test-gcc-asan
+3309213: binding file /lib/x86_64-linux-gnu/libc.so.6 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+3309213: binding file /lib64/ld-linux-x86-64.so.2 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+3309213: binding file /usr/lib/x86_64-linux-gnu/libstdc++.so.6 [0] to /usr/lib/x86_64-linux-gnu/libasan.so.5 [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+&lt;/code>&lt;/pre>&lt;p>可以看到动态链接器将 libc.so, ld-linux-x86-64.so 和 libstdc++.so 中对 malloc 的引用都绑定到了 libasan.so 中的 malloc 实现。&lt;/p>
+&lt;hr>
+&lt;p>下面我们看下 Clang，因为 Clang 默认是&lt;strong>静态链接&lt;/strong> ASan 运行时库，所以我们就不看 test-clang-asan 所依赖的动态库了，直接看 symbol binding 的过程：&lt;/p>
+&lt;pre tabindex="0">&lt;code>$ clang++ -fsanitize=address test.cpp -o test-clang-asan
 $ LD_DEBUG=&amp;#34;bindings&amp;#34; ./test-clang-asan
-   3313022:        binding file /lib/x86_64-linux-gnu/libc.so.6 [0] to ./test-clang-asan [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
-   3313022:        binding file /lib64/ld-linux-x86-64.so.2 [0] to ./test-clang-asan [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
-   3313022:        binding file /usr/lib/x86_64-linux-gnu/libstdc++.so.6 [0] to ./test-clang-asan [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;同样可以看到动态链接器将 libc.so, ld-linux-x86-64.so.2 和 libstdc++.so 中对 malloc 的引用都绑定到了 test-clang-asan 中的 malloc 实现（因为 ASan 运行时库 中实现了 malloc，并且 clang 将 ASan 运行时库静态链接到 test-clang-asan 中）。&lt;/p&gt;
-&lt;h2 id=&#34;sanitizer-interceptor&#34;&gt;Sanitizer interceptor&lt;/h2&gt;
-&lt;p&gt;下面我们来在源码的角度，学习下 sanitizer interceptor 的实现。&lt;/p&gt;
-&lt;p&gt;阅读学习 LLVM 代码的一个非常有效的方式就是结合对应的测试代码来学习。&lt;/p&gt;
-&lt;p&gt;Sanitizer interceptor 存在一个测试文件 interception_linux_test.cpp，&lt;a href=&#34;https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/tests/interception_linux_test.cpp&#34;&gt;llvm-project/interception_linux_test.cpp at main · llvm/llvm-project · GitHub&lt;/a&gt;&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;#include&lt;/span&gt; &lt;span style=&#34;color:#75715e&#34;&gt;&amp;#34;interception/interception.h&amp;#34;&lt;/span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;#include&lt;/span&gt; &lt;span style=&#34;color:#75715e&#34;&gt;&amp;#34;gtest/gtest.h&amp;#34;&lt;/span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;static&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; InterceptorFunctionCalled;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;DECLARE_REAL(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;, isdigit, &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;INTERCEPTOR(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;, isdigit, &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#f92672&#34;&gt;++&lt;/span&gt;InterceptorFunctionCalled;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;0&amp;#39;&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&amp;amp;&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;9&amp;#39;&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;namespace&lt;/span&gt; __interception {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;TEST(Interception, Basic) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_TRUE(INTERCEPT_FUNCTION(isdigit));
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#75715e&#34;&gt;// After interception, the counter should be incremented.
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;  InterceptorFunctionCalled &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_NE(&lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;, isdigit(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;1&amp;#39;&lt;/span&gt;));
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_EQ(&lt;span style=&#34;color:#ae81ff&#34;&gt;1&lt;/span&gt;, InterceptorFunctionCalled);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_EQ(&lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;, isdigit(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;a&amp;#39;&lt;/span&gt;));
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_EQ(&lt;span style=&#34;color:#ae81ff&#34;&gt;2&lt;/span&gt;, InterceptorFunctionCalled);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#75715e&#34;&gt;// Calling the REAL function should not affect the counter.
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;  InterceptorFunctionCalled &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_NE(&lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;, REAL(isdigit)(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;1&amp;#39;&lt;/span&gt;));
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_EQ(&lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;, REAL(isdigit)(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;a&amp;#39;&lt;/span&gt;));
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  EXPECT_EQ(&lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;, InterceptorFunctionCalled);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}  &lt;span style=&#34;color:#75715e&#34;&gt;// namespace __interception
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;这段测试代码基于 sanitizer 的 interceptor 机制替换了 &lt;code&gt;isdigit&lt;/code&gt; 函数的实现，在我们实现的 &lt;code&gt;isdigit&lt;/code&gt; 函数中，每次 &lt;code&gt;isdigit&lt;/code&gt; 函数被调用时都将变量 &lt;code&gt;InterceptorFunctionCalled&lt;/code&gt; 自增 1。然后通过检验变量 &lt;code&gt;InterceptorFunctionCalled&lt;/code&gt; 的值来测试 interceptor 机制的实现是否正确，通过 &lt;code&gt;REAL(isdigit)&lt;/code&gt; 来调用真正的 &lt;code&gt;isdigit&lt;/code&gt; 函数实现。&lt;/p&gt;
-&lt;p&gt;上述测试文件 interception_linux_test.cpp 中实现替换 &lt;code&gt;isdigit&lt;/code&gt; 函数的核心部分是如下代码片段：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;INTERCEPTOR(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;, isdigit, &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#f92672&#34;&gt;++&lt;/span&gt;InterceptorFunctionCalled;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;0&amp;#39;&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&amp;amp;&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;9&amp;#39;&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;INTERCEPT_FUNCTION(isdigit);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;DECLARE_REAL(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;, isdigit, &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;REAL(isdigit)(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;1&amp;#39;&lt;/span&gt;);
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;code&gt;INTERCEPTOR(int, isdigit, int d) { ... }&lt;/code&gt; 用于将函数 &lt;code&gt;isdigit&lt;/code&gt; 的实现替换为 { &amp;hellip; } 的实现&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;在代码中调用 &lt;code&gt;isdigit&lt;/code&gt; 之前，需要先调用 &lt;code&gt;INTERCEPT_FUNCTION(isdigit)&lt;/code&gt;。如果 &lt;code&gt;INTERCEPT_FUNCTION(isdigit)&lt;/code&gt; 返回为 true，则说明成功替换了将 libc 中 &lt;code&gt;isdigit&lt;/code&gt; 函数的实现。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;code&gt;REAL(isdigit)(&#39;1&#39;)&lt;/code&gt; 用于调用真正的 &lt;code&gt;isdigit&lt;/code&gt; 实现，不过在调用 &lt;code&gt;REAL(isdigit)(&#39;1&#39;)&lt;/code&gt; 之前需要先 &lt;code&gt;DECLARE_REAL(int, isdigit, int)&lt;/code&gt;。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;这部分代码在宏展开后的内容如下：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// INTERCEPTOR(int, isdigit, int d) 宏展开
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;typedef&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;int&lt;/span&gt; (&lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;isdigit_type)(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;namespace&lt;/span&gt; __interception { isdigit_type real_isdigit; }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;C&amp;#34;&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; isdigit(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d) __attribute__((weak, alias(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;__interceptor_isdigit&amp;#34;&lt;/span&gt;), visibility(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;default&amp;#34;&lt;/span&gt;)));
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;C&amp;#34;&lt;/span&gt; __attribute__((visibility(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;default&amp;#34;&lt;/span&gt;))) &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; __interceptor_isdigit(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#f92672&#34;&gt;++&lt;/span&gt;InterceptorFunctionCalled;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;0&amp;#39;&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&amp;amp;&lt;/span&gt; d &lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;9&amp;#39;&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// INTERCEPT_FUNCTION(isdigit) 宏展开
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;__interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;InterceptFunction(
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;isdigit&amp;#34;&lt;/span&gt;,
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    (&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;__interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;uptr &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;) &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt; __interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;real_isdigit,
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    (&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;__interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;uptr) &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt; (isdigit),
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    (&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;__interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;uptr) &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt; __interceptor_isdigit);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// DECLARE_REAL(int, isdigit, int) 宏展开
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;typedef&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;int&lt;/span&gt; (&lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;isdigit_type)(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;namespace&lt;/span&gt; __interception { &lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; isdigit_type real_isdigit; };
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// REAL(isdigit)(&amp;#39;1&amp;#39;) 宏展开
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;__interception&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;real_isdigit(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#39;1&amp;#39;&lt;/span&gt;);
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;我们首先看下 INTERCEPTOR 宏做了哪些事情&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;首先在 __interception namespace 中定义了一个函数指针 real_isdigit，该函数指针实际上后续会被设置为指向真正的 &lt;code&gt;isdigit&lt;/code&gt; 函数地址。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;然后将 &lt;code&gt;isdigit&lt;/code&gt; 函数设置为 weak，并且将 &lt;code&gt;isdigit&lt;/code&gt; 设置成 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 的 alias 别名&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;最后将我们自己版本的 &lt;code&gt;isdigit&lt;/code&gt; 函数逻辑实现在 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 函数中&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;根据 symbol interposition 这一节的内容，我们知道：要想替换 libc.so 中 某个函数的实现（不妨把该函数称作 &lt;code&gt;foo&lt;/code&gt;），只需要在 sanitizer runtime library 中定义同名 &lt;code&gt;foo&lt;/code&gt; 函数，然后让 dynamic loader 在查找符号时 sanitizer runtime library 的顺序先于 libc.so 即可。&lt;/p&gt;
-&lt;p&gt;那为什么这里要将我们的 &lt;code&gt;isdigit&lt;/code&gt; 函数逻辑实现在函数 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 中，并且将 &lt;code&gt;isdigit&lt;/code&gt; 设置成 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 的 alias 别名呢？&lt;/p&gt;
-&lt;p&gt;考虑如下场景：假设用户代码中也替换了 &lt;code&gt;isdigit&lt;/code&gt; 函数的实现，添加了自己的逻辑，那么最终 dynamic loader 选择的是用户代码中的 &lt;code&gt;isdigit&lt;/code&gt; 的实现，而不是 sanitizer runtime library 中的 &lt;code&gt;isdigit&lt;/code&gt; 的实现，这样的话 sanitizer 的功能就不能正常工作了。（实际上 sanitizer runtime library 中并没有替换 &lt;code&gt;isdigit&lt;/code&gt; 的实现，这里只是用 &lt;code&gt;isdigit&lt;/code&gt; 举例子便于说明）。&lt;/p&gt;
-&lt;p&gt;但是如果我们在 sanitizer runtime library 中将 &lt;code&gt;isdigit&lt;/code&gt; 设置成 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 的 alias 别名，那么在用户代码中自己替换 &lt;code&gt;isdigit&lt;/code&gt; 实现时就可以显示调用 &lt;code&gt;__interceptor_isdigit&lt;/code&gt; 了。这样既不影响用户自行替换库函数，也不影响 sanitizer 功能的正确运行 ：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;C&amp;#34;&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; __interceptor_isdigit(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;extern&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;C&amp;#34;&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; isdigit(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; d) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  fprintf(stderr, &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;my_isdigit_interceptor&lt;/span&gt;&lt;span style=&#34;color:#ae81ff&#34;&gt;\n&lt;/span&gt;&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;&lt;/span&gt;);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;__interceptor_isdigit&lt;/span&gt;(d);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;那在 sanitizer runtime library 中为什么将被替换的函数设置为 weak 呢？&lt;/p&gt;
-&lt;p&gt;这是因为如果不设置为 weak ，在静态链接 sanitizer runtime library 时就会因为 multiple definition 而链接失败。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;接着我们看下 INTERCEPT_FUNCTION 宏做了哪些事情&lt;/p&gt;
-&lt;p&gt;INTERCEPT_FUNCTION 宏展开后就是对 __interception::InterceptFunction 函数的调用。&lt;code&gt;InterceptFunction&lt;/code&gt; 函数的定义在 &lt;a href=&#34;https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/interception_linux.cpp&#34;&gt;https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/interception_linux.cpp&lt;/a&gt;：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;namespace&lt;/span&gt; __interception {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;static&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;&lt;span style=&#34;color:#a6e22e&#34;&gt;GetFuncAddr&lt;/span&gt;(&lt;span style=&#34;color:#66d9ef&#34;&gt;const&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;char&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;name, uptr wrapper_addr) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; dlsym(RTLD_NEXT, name);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;if&lt;/span&gt; (&lt;span style=&#34;color:#f92672&#34;&gt;!&lt;/span&gt;addr) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// If the lookup using RTLD_NEXT failed, the sanitizer runtime library is
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// later in the library search order than the DSO that we are trying to
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// intercept, which means that we cannot intercept this function. We still
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// want the address of the real definition, though, so look it up using
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// RTLD_DEFAULT.
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; dlsym(RTLD_DEFAULT, name);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// In case `name&amp;#39; is not loaded, dlsym ends up finding the actual wrapper.
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#75715e&#34;&gt;// We don&amp;#39;t want to intercept the wrapper and have it point to itself.
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;    &lt;span style=&#34;color:#66d9ef&#34;&gt;if&lt;/span&gt; ((uptr)addr &lt;span style=&#34;color:#f92672&#34;&gt;==&lt;/span&gt; wrapper_addr)
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;      addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;nullptr&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; addr;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;bool&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;InterceptFunction&lt;/span&gt;(&lt;span style=&#34;color:#66d9ef&#34;&gt;const&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;char&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;name, uptr &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;ptr_to_real, uptr func,
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;                       uptr wrapper) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; GetFuncAddr(name, wrapper);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;ptr_to_real &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; (uptr)addr;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; addr &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&amp;amp;&lt;/span&gt; (func &lt;span style=&#34;color:#f92672&#34;&gt;==&lt;/span&gt; wrapper);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}  &lt;span style=&#34;color:#75715e&#34;&gt;// namespace __interception
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;其实 &lt;code&gt;InterceptFunction&lt;/code&gt; 函数的实现很简单：首先通过函数 &lt;code&gt;GetFuncAddr&lt;/code&gt; 获得原本的名为 name 的函数地址，然后将该地址保存至指针 &lt;code&gt;ptr_to_real&lt;/code&gt; 指向的内存。&lt;/p&gt;
-&lt;p&gt;函数 &lt;code&gt;GetFuncAddr&lt;/code&gt; 的代码实现也很简单，核心就是 &lt;a href=&#34;https://man7.org/linux/man-pages/man3/dlsym.3.html&#34;&gt;dlsym&lt;/a&gt;：&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;RTLD_DEFAULT
-    Find the first occurrence of the desired symbol using the
-    default shared object search order.  The search will
-    include global symbols in the executable and its
-    dependencies, as well as symbols in shared objects that
-    were dynamically loaded with the RTLD_GLOBAL flag.
-
+3313022: binding file /lib/x86_64-linux-gnu/libc.so.6 [0] to ./test-clang-asan [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+3313022: binding file /lib64/ld-linux-x86-64.so.2 [0] to ./test-clang-asan [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+3313022: binding file /usr/lib/x86_64-linux-gnu/libstdc++.so.6 [0] to ./test-clang-asan [0]: normal symbol `malloc&amp;#39; [GLIBC_2.2.5]
+&lt;/code>&lt;/pre>&lt;p>同样可以看到动态链接器将 libc.so, ld-linux-x86-64.so.2 和 libstdc++.so 中对 malloc 的引用都绑定到了 test-clang-asan 中的 malloc 实现（因为 ASan 运行时库 中实现了 malloc，并且 clang 将 ASan 运行时库静态链接到 test-clang-asan 中）。&lt;/p>
+&lt;h2 id="sanitizer-interceptor">Sanitizer interceptor&lt;/h2>
+&lt;p>下面我们来在源码的角度，学习下 sanitizer interceptor 的实现。&lt;/p>
+&lt;p>阅读学习 LLVM 代码的一个非常有效的方式就是结合对应的测试代码来学习。&lt;/p>
+&lt;p>Sanitizer interceptor 存在一个测试文件 interception_linux_test.cpp，&lt;a href="https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/tests/interception_linux_test.cpp">llvm-project/interception_linux_test.cpp at main · llvm/llvm-project · GitHub&lt;/a>&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">#include&lt;/span> &lt;span style="color:#75715e">&amp;#34;interception/interception.h&amp;#34;&lt;/span>&lt;span style="color:#75715e">
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">#include&lt;/span> &lt;span style="color:#75715e">&amp;#34;gtest/gtest.h&amp;#34;&lt;/span>&lt;span style="color:#75715e">
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">static&lt;/span> &lt;span style="color:#66d9ef">int&lt;/span> InterceptorFunctionCalled;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>DECLARE_REAL(&lt;span style="color:#66d9ef">int&lt;/span>, isdigit, &lt;span style="color:#66d9ef">int&lt;/span>);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>INTERCEPTOR(&lt;span style="color:#66d9ef">int&lt;/span>, isdigit, &lt;span style="color:#66d9ef">int&lt;/span> d) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#f92672">++&lt;/span>InterceptorFunctionCalled;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> d &lt;span style="color:#f92672">&amp;gt;=&lt;/span> &lt;span style="color:#e6db74">&amp;#39;0&amp;#39;&lt;/span> &lt;span style="color:#f92672">&amp;amp;&amp;amp;&lt;/span> d &lt;span style="color:#f92672">&amp;lt;=&lt;/span> &lt;span style="color:#e6db74">&amp;#39;9&amp;#39;&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">namespace&lt;/span> __interception {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>TEST(Interception, Basic) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> EXPECT_TRUE(INTERCEPT_FUNCTION(isdigit));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e">// After interception, the counter should be incremented.
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> InterceptorFunctionCalled &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#ae81ff">0&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> EXPECT_NE(&lt;span style="color:#ae81ff">0&lt;/span>, isdigit(&lt;span style="color:#e6db74">&amp;#39;1&amp;#39;&lt;/span>));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> EXPECT_EQ(&lt;span style="color:#ae81ff">1&lt;/span>, InterceptorFunctionCalled);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> EXPECT_EQ(&lt;span style="color:#ae81ff">0&lt;/span>, isdigit(&lt;span style="color:#e6db74">&amp;#39;a&amp;#39;&lt;/span>));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> EXPECT_EQ(&lt;span style="color:#ae81ff">2&lt;/span>, InterceptorFunctionCalled);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e">// Calling the REAL function should not affect the counter.
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> InterceptorFunctionCalled &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#ae81ff">0&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> EXPECT_NE(&lt;span style="color:#ae81ff">0&lt;/span>, REAL(isdigit)(&lt;span style="color:#e6db74">&amp;#39;1&amp;#39;&lt;/span>));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> EXPECT_EQ(&lt;span style="color:#ae81ff">0&lt;/span>, REAL(isdigit)(&lt;span style="color:#e6db74">&amp;#39;a&amp;#39;&lt;/span>));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> EXPECT_EQ(&lt;span style="color:#ae81ff">0&lt;/span>, InterceptorFunctionCalled);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} &lt;span style="color:#75715e">// namespace __interception
+&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>这段测试代码基于 sanitizer 的 interceptor 机制替换了 &lt;code>isdigit&lt;/code> 函数的实现，在我们实现的 &lt;code>isdigit&lt;/code> 函数中，每次 &lt;code>isdigit&lt;/code> 函数被调用时都将变量 &lt;code>InterceptorFunctionCalled&lt;/code> 自增 1。然后通过检验变量 &lt;code>InterceptorFunctionCalled&lt;/code> 的值来测试 interceptor 机制的实现是否正确，通过 &lt;code>REAL(isdigit)&lt;/code> 来调用真正的 &lt;code>isdigit&lt;/code> 函数实现。&lt;/p>
+&lt;p>上述测试文件 interception_linux_test.cpp 中实现替换 &lt;code>isdigit&lt;/code> 函数的核心部分是如下代码片段：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>INTERCEPTOR(&lt;span style="color:#66d9ef">int&lt;/span>, isdigit, &lt;span style="color:#66d9ef">int&lt;/span> d) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#f92672">++&lt;/span>InterceptorFunctionCalled;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> d &lt;span style="color:#f92672">&amp;gt;=&lt;/span> &lt;span style="color:#e6db74">&amp;#39;0&amp;#39;&lt;/span> &lt;span style="color:#f92672">&amp;amp;&amp;amp;&lt;/span> d &lt;span style="color:#f92672">&amp;lt;=&lt;/span> &lt;span style="color:#e6db74">&amp;#39;9&amp;#39;&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>INTERCEPT_FUNCTION(isdigit);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>DECLARE_REAL(&lt;span style="color:#66d9ef">int&lt;/span>, isdigit, &lt;span style="color:#66d9ef">int&lt;/span>);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>REAL(isdigit)(&lt;span style="color:#e6db74">&amp;#39;1&amp;#39;&lt;/span>);
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;ul>
+&lt;li>
+&lt;p>&lt;code>INTERCEPTOR(int, isdigit, int d) { ... }&lt;/code> 用于将函数 &lt;code>isdigit&lt;/code> 的实现替换为 { &amp;hellip; } 的实现&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>在代码中调用 &lt;code>isdigit&lt;/code> 之前，需要先调用 &lt;code>INTERCEPT_FUNCTION(isdigit)&lt;/code>。如果 &lt;code>INTERCEPT_FUNCTION(isdigit)&lt;/code> 返回为 true，则说明成功替换了将 libc 中 &lt;code>isdigit&lt;/code> 函数的实现。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;code>REAL(isdigit)('1')&lt;/code> 用于调用真正的 &lt;code>isdigit&lt;/code> 实现，不过在调用 &lt;code>REAL(isdigit)('1')&lt;/code> 之前需要先 &lt;code>DECLARE_REAL(int, isdigit, int)&lt;/code>。&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>这部分代码在宏展开后的内容如下：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// INTERCEPTOR(int, isdigit, int d) 宏展开
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>&lt;span style="color:#66d9ef">typedef&lt;/span> &lt;span style="color:#a6e22e">int&lt;/span> (&lt;span style="color:#f92672">*&lt;/span>isdigit_type)(&lt;span style="color:#66d9ef">int&lt;/span> d);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">namespace&lt;/span> __interception { isdigit_type real_isdigit; }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">extern&lt;/span> &lt;span style="color:#e6db74">&amp;#34;C&amp;#34;&lt;/span> &lt;span style="color:#66d9ef">int&lt;/span> isdigit(&lt;span style="color:#66d9ef">int&lt;/span> d) __attribute__((weak, alias(&lt;span style="color:#e6db74">&amp;#34;__interceptor_isdigit&amp;#34;&lt;/span>), visibility(&lt;span style="color:#e6db74">&amp;#34;default&amp;#34;&lt;/span>)));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">extern&lt;/span> &lt;span style="color:#e6db74">&amp;#34;C&amp;#34;&lt;/span> __attribute__((visibility(&lt;span style="color:#e6db74">&amp;#34;default&amp;#34;&lt;/span>))) &lt;span style="color:#66d9ef">int&lt;/span> __interceptor_isdigit(&lt;span style="color:#66d9ef">int&lt;/span> d) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#f92672">++&lt;/span>InterceptorFunctionCalled;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> d &lt;span style="color:#f92672">&amp;gt;=&lt;/span> &lt;span style="color:#e6db74">&amp;#39;0&amp;#39;&lt;/span> &lt;span style="color:#f92672">&amp;amp;&amp;amp;&lt;/span> d &lt;span style="color:#f92672">&amp;lt;=&lt;/span> &lt;span style="color:#e6db74">&amp;#39;9&amp;#39;&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// INTERCEPT_FUNCTION(isdigit) 宏展开
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>&lt;span style="color:#f92672">::&lt;/span>__interception&lt;span style="color:#f92672">::&lt;/span>InterceptFunction(
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#e6db74">&amp;#34;isdigit&amp;#34;&lt;/span>,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> (&lt;span style="color:#f92672">::&lt;/span>__interception&lt;span style="color:#f92672">::&lt;/span>uptr &lt;span style="color:#f92672">*&lt;/span>) &lt;span style="color:#f92672">&amp;amp;&lt;/span> __interception&lt;span style="color:#f92672">::&lt;/span>real_isdigit,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> (&lt;span style="color:#f92672">::&lt;/span>__interception&lt;span style="color:#f92672">::&lt;/span>uptr) &lt;span style="color:#f92672">&amp;amp;&lt;/span> (isdigit),
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> (&lt;span style="color:#f92672">::&lt;/span>__interception&lt;span style="color:#f92672">::&lt;/span>uptr) &lt;span style="color:#f92672">&amp;amp;&lt;/span> __interceptor_isdigit);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// DECLARE_REAL(int, isdigit, int) 宏展开
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>&lt;span style="color:#66d9ef">typedef&lt;/span> &lt;span style="color:#a6e22e">int&lt;/span> (&lt;span style="color:#f92672">*&lt;/span>isdigit_type)(&lt;span style="color:#66d9ef">int&lt;/span>);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">namespace&lt;/span> __interception { &lt;span style="color:#66d9ef">extern&lt;/span> isdigit_type real_isdigit; };
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// REAL(isdigit)(&amp;#39;1&amp;#39;) 宏展开
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>__interception&lt;span style="color:#f92672">::&lt;/span>real_isdigit(&lt;span style="color:#e6db74">&amp;#39;1&amp;#39;&lt;/span>);
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;ul>
+&lt;li>
+&lt;p>我们首先看下 INTERCEPTOR 宏做了哪些事情&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>首先在 __interception namespace 中定义了一个函数指针 real_isdigit，该函数指针实际上后续会被设置为指向真正的 &lt;code>isdigit&lt;/code> 函数地址。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>然后将 &lt;code>isdigit&lt;/code> 函数设置为 weak，并且将 &lt;code>isdigit&lt;/code> 设置成 &lt;code>__interceptor_isdigit&lt;/code> 的 alias 别名&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>最后将我们自己版本的 &lt;code>isdigit&lt;/code> 函数逻辑实现在 &lt;code>__interceptor_isdigit&lt;/code> 函数中&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>根据 symbol interposition 这一节的内容，我们知道：要想替换 libc.so 中 某个函数的实现（不妨把该函数称作 &lt;code>foo&lt;/code>），只需要在 sanitizer runtime library 中定义同名 &lt;code>foo&lt;/code> 函数，然后让 dynamic loader 在查找符号时 sanitizer runtime library 的顺序先于 libc.so 即可。&lt;/p>
+&lt;p>那为什么这里要将我们的 &lt;code>isdigit&lt;/code> 函数逻辑实现在函数 &lt;code>__interceptor_isdigit&lt;/code> 中，并且将 &lt;code>isdigit&lt;/code> 设置成 &lt;code>__interceptor_isdigit&lt;/code> 的 alias 别名呢？&lt;/p>
+&lt;p>考虑如下场景：假设用户代码中也替换了 &lt;code>isdigit&lt;/code> 函数的实现，添加了自己的逻辑，那么最终 dynamic loader 选择的是用户代码中的 &lt;code>isdigit&lt;/code> 的实现，而不是 sanitizer runtime library 中的 &lt;code>isdigit&lt;/code> 的实现，这样的话 sanitizer 的功能就不能正常工作了。（实际上 sanitizer runtime library 中并没有替换 &lt;code>isdigit&lt;/code> 的实现，这里只是用 &lt;code>isdigit&lt;/code> 举例子便于说明）。&lt;/p>
+&lt;p>但是如果我们在 sanitizer runtime library 中将 &lt;code>isdigit&lt;/code> 设置成 &lt;code>__interceptor_isdigit&lt;/code> 的 alias 别名，那么在用户代码中自己替换 &lt;code>isdigit&lt;/code> 实现时就可以显示调用 &lt;code>__interceptor_isdigit&lt;/code> 了。这样既不影响用户自行替换库函数，也不影响 sanitizer 功能的正确运行 ：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">extern&lt;/span> &lt;span style="color:#e6db74">&amp;#34;C&amp;#34;&lt;/span> &lt;span style="color:#66d9ef">int&lt;/span> __interceptor_isdigit(&lt;span style="color:#66d9ef">int&lt;/span> d);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">extern&lt;/span> &lt;span style="color:#e6db74">&amp;#34;C&amp;#34;&lt;/span> &lt;span style="color:#66d9ef">int&lt;/span> isdigit(&lt;span style="color:#66d9ef">int&lt;/span> d) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> fprintf(stderr, &lt;span style="color:#e6db74">&amp;#34;my_isdigit_interceptor&lt;/span>&lt;span style="color:#ae81ff">\n&lt;/span>&lt;span style="color:#e6db74">&amp;#34;&lt;/span>);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> &lt;span style="color:#a6e22e">__interceptor_isdigit&lt;/span>(d);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>那在 sanitizer runtime library 中为什么将被替换的函数设置为 weak 呢？&lt;/p>
+&lt;p>这是因为如果不设置为 weak ，在静态链接 sanitizer runtime library 时就会因为 multiple definition 而链接失败。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>接着我们看下 INTERCEPT_FUNCTION 宏做了哪些事情&lt;/p>
+&lt;p>INTERCEPT_FUNCTION 宏展开后就是对 __interception::InterceptFunction 函数的调用。&lt;code>InterceptFunction&lt;/code> 函数的定义在 &lt;a href="https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/interception_linux.cpp">https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/interception/interception_linux.cpp&lt;/a>：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">namespace&lt;/span> __interception {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">static&lt;/span> &lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#f92672">*&lt;/span>&lt;span style="color:#a6e22e">GetFuncAddr&lt;/span>(&lt;span style="color:#66d9ef">const&lt;/span> &lt;span style="color:#66d9ef">char&lt;/span> &lt;span style="color:#f92672">*&lt;/span>name, uptr wrapper_addr) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#f92672">*&lt;/span>addr &lt;span style="color:#f92672">=&lt;/span> dlsym(RTLD_NEXT, name);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> (&lt;span style="color:#f92672">!&lt;/span>addr) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e">// If the lookup using RTLD_NEXT failed, the sanitizer runtime library is
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> &lt;span style="color:#75715e">// later in the library search order than the DSO that we are trying to
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> &lt;span style="color:#75715e">// intercept, which means that we cannot intercept this function. We still
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> &lt;span style="color:#75715e">// want the address of the real definition, though, so look it up using
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> &lt;span style="color:#75715e">// RTLD_DEFAULT.
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> addr &lt;span style="color:#f92672">=&lt;/span> dlsym(RTLD_DEFAULT, name);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e">// In case `name&amp;#39; is not loaded, dlsym ends up finding the actual wrapper.
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> &lt;span style="color:#75715e">// We don&amp;#39;t want to intercept the wrapper and have it point to itself.
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> &lt;span style="color:#66d9ef">if&lt;/span> ((uptr)addr &lt;span style="color:#f92672">==&lt;/span> wrapper_addr)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> addr &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#66d9ef">nullptr&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> addr;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">bool&lt;/span> &lt;span style="color:#a6e22e">InterceptFunction&lt;/span>(&lt;span style="color:#66d9ef">const&lt;/span> &lt;span style="color:#66d9ef">char&lt;/span> &lt;span style="color:#f92672">*&lt;/span>name, uptr &lt;span style="color:#f92672">*&lt;/span>ptr_to_real, uptr func,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> uptr wrapper) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#f92672">*&lt;/span>addr &lt;span style="color:#f92672">=&lt;/span> GetFuncAddr(name, wrapper);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#f92672">*&lt;/span>ptr_to_real &lt;span style="color:#f92672">=&lt;/span> (uptr)addr;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> addr &lt;span style="color:#f92672">&amp;amp;&amp;amp;&lt;/span> (func &lt;span style="color:#f92672">==&lt;/span> wrapper);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>} &lt;span style="color:#75715e">// namespace __interception
+&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>其实 &lt;code>InterceptFunction&lt;/code> 函数的实现很简单：首先通过函数 &lt;code>GetFuncAddr&lt;/code> 获得原本的名为 name 的函数地址，然后将该地址保存至指针 &lt;code>ptr_to_real&lt;/code> 指向的内存。&lt;/p>
+&lt;p>函数 &lt;code>GetFuncAddr&lt;/code> 的代码实现也很简单，核心就是 &lt;a href="https://man7.org/linux/man-pages/man3/dlsym.3.html">dlsym&lt;/a>：&lt;/p>
+&lt;pre>&lt;code>RTLD_DEFAULT
+Find the first occurrence of the desired symbol using the
+default shared object search order. The search will
+include global symbols in the executable and its
+dependencies, as well as symbols in shared objects that
+were dynamically loaded with the RTLD_GLOBAL flag.
 RTLD_NEXT
-    Find the next occurrence of the desired symbol in the
-    search order after the current object.  This allows one to
-    provide a wrapper around a function in another shared
-    object, so that, for example, the definition of a function
-    in a preloaded shared object (see LD_PRELOAD in ld.so(8))
-    can find and invoke the &amp;quot;real&amp;quot; function provided in
-    another shared object (or for that matter, the &amp;quot;next&amp;quot;
-    definition of the function in cases where there are
-    multiple layers of preloading).
-&lt;/code&gt;&lt;/pre&gt;
-&lt;p&gt;这也是为什么在函数 &lt;code&gt;GetFuncAddr&lt;/code&gt; 中，先用 &lt;code&gt;dlsym(RTLD_NEXT, name)&lt;/code&gt; 去寻找被 intercepted 函数的真实地址，因为 sanitizer runtime library 是先于 name 函数真正所在的 shared object。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;最后我们看下 DECLARE_REAL 宏 和 REAL 宏做了哪些事情&lt;/p&gt;
-&lt;p&gt;DECLARE_REAL 展开后就是声明了在 __interception namespace 中存在一个指向被替换函数真正实现的函数指针，REAL 宏就是通过这个函数指针来调用被替换函数的真正实现。&lt;/p&gt;
-&lt;p&gt;例如，在测试用例中，&lt;code&gt;DECLARE_REAL(int, isdigit, int);&lt;/code&gt; 就是在声明 __interception namespace 中存在一个函数指针 &lt;code&gt;real_isdigit&lt;/code&gt;，该函数指针指向真正的 &lt;code&gt;isdigit&lt;/code&gt; 函数地址，通过 &lt;code&gt;REAL(isdigit)&lt;/code&gt; 来调用真正的 &lt;code&gt;isdigit&lt;/code&gt; 函数。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2 id=&#34;ps&#34;&gt;P.S.&lt;/h2&gt;
-&lt;p&gt;&lt;code&gt;__attribute__((alias))&lt;/code&gt; 很有意思：&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;Where a function is defined in the current translation unit, the alias call is replaced by a call to the function, and the alias is emitted alongside the original name. Where a function is not defined in the current translation unit, the alias call is replaced by a call to the real function. Where a function is defined as static, the function name is replaced by the alias name and the function is declared external if the alias name is declared external.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;在 ASan runtime library 中 malloc 是 weak 符号，并且 malloc 和 __interceptor_malloc 实际指向同一个地址。&lt;/p&gt;
-&lt;p&gt;也就是说 &lt;code&gt;extern &amp;quot;C&amp;quot; void *malloc(size_t size) __attribute__((weak, alias(&amp;quot;__interceptor_malloc&amp;quot;), visibility(&amp;quot;default&amp;quot;)));&lt;/code&gt; 使得在 ASan runtime library 中造了一个弱符号 malloc，然后指向的和 __interceptor_malloc 是同一个地址。&lt;/p&gt;
-&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;$ readelf -sW --dyn-syms $(clang -print-file-name=libclang_rt.asan-x86_64.a) | grep malloc
-  ...
-  99: 0000000000001150   606 FUNC    GLOBAL DEFAULT    3 __interceptor_malloc
-  102: 0000000000001150   606 FUNC    WEAK   DEFAULT    3 malloc
-
+Find the next occurrence of the desired symbol in the
+search order after the current object. This allows one to
+provide a wrapper around a function in another shared
+object, so that, for example, the definition of a function
+in a preloaded shared object (see LD_PRELOAD in ld.so(8))
+can find and invoke the &amp;quot;real&amp;quot; function provided in
+another shared object (or for that matter, the &amp;quot;next&amp;quot;
+definition of the function in cases where there are
+multiple layers of preloading).
+&lt;/code>&lt;/pre>
+&lt;p>这也是为什么在函数 &lt;code>GetFuncAddr&lt;/code> 中，先用 &lt;code>dlsym(RTLD_NEXT, name)&lt;/code> 去寻找被 intercepted 函数的真实地址，因为 sanitizer runtime library 是先于 name 函数真正所在的 shared object。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>最后我们看下 DECLARE_REAL 宏 和 REAL 宏做了哪些事情&lt;/p>
+&lt;p>DECLARE_REAL 展开后就是声明了在 __interception namespace 中存在一个指向被替换函数真正实现的函数指针，REAL 宏就是通过这个函数指针来调用被替换函数的真正实现。&lt;/p>
+&lt;p>例如，在测试用例中，&lt;code>DECLARE_REAL(int, isdigit, int);&lt;/code> 就是在声明 __interception namespace 中存在一个函数指针 &lt;code>real_isdigit&lt;/code>，该函数指针指向真正的 &lt;code>isdigit&lt;/code> 函数地址，通过 &lt;code>REAL(isdigit)&lt;/code> 来调用真正的 &lt;code>isdigit&lt;/code> 函数。&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;h2 id="ps">P.S.&lt;/h2>
+&lt;p>&lt;code>__attribute__((alias))&lt;/code> 很有意思：&lt;/p>
+&lt;blockquote>
+&lt;p>Where a function is defined in the current translation unit, the alias call is replaced by a call to the function, and the alias is emitted alongside the original name. Where a function is not defined in the current translation unit, the alias call is replaced by a call to the real function. Where a function is defined as static, the function name is replaced by the alias name and the function is declared external if the alias name is declared external.&lt;/p>
+&lt;/blockquote>
+&lt;p>在 ASan runtime library 中 malloc 是 weak 符号，并且 malloc 和 __interceptor_malloc 实际指向同一个地址。&lt;/p>
+&lt;p>也就是说 &lt;code>extern &amp;quot;C&amp;quot; void *malloc(size_t size) __attribute__((weak, alias(&amp;quot;__interceptor_malloc&amp;quot;), visibility(&amp;quot;default&amp;quot;)));&lt;/code> 使得在 ASan runtime library 中造了一个弱符号 malloc，然后指向的和 __interceptor_malloc 是同一个地址。&lt;/p>
+&lt;pre tabindex="0">&lt;code>$ readelf -sW --dyn-syms $(clang -print-file-name=libclang_rt.asan-x86_64.a) | grep malloc
+...
+99: 0000000000001150 606 FUNC GLOBAL DEFAULT 3 __interceptor_malloc
+102: 0000000000001150 606 FUNC WEAK DEFAULT 3 malloc
 $ readelf -sW --dyn-syms $(clang -print-file-name=libclang_rt.asan-x86_64.so) | grep malloc
-  ...
-  3008: 00000000000fd600   606 FUNC    WEAK   DEFAULT   12 malloc
-  4519: 00000000000fd600   606 FUNC    GLOBAL DEFAULT   12 __interceptor_malloc
-&lt;/code&gt;&lt;/pre&gt;&lt;h2 id=&#34;ps2&#34;&gt;P.S.2&lt;/h2&gt;
-&lt;p&gt;熟悉在 Linux 下 sanitizer interceptor 机制的底层原理后，就很容易明白使用 sanitizer 时遇到的一些问题或坑为什么会是这样的。例如：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&#34;https://github.com/google/sanitizers/issues/611&#34;&gt;Address Sanitizer fails to intercept function in shared library opened with RTLD_DEEPBIND · Issue #611 · google/sanitizers · GitHub&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&#34;https://github.com/google/sanitizers/issues/796&#34;&gt;ASan runtime does not come first in initial library list; you should either link runtime to your application or manually preload it with LD_PRELOAD. · Issue #796 · google/sanitizers · GitHub&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&#34;https://stackoverflow.com/questions/66971217/is-it-okay-if-asan-runtime-loaded-as-second-library&#34;&gt;address sanitizer - Is it okay if ASAN runtime loaded as second library? - Stack Overflow&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2 id=&#34;references&#34;&gt;References&lt;/h2&gt;
-&lt;ol&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&#34;https://maskray.me/blog/2021-05-16-elf-interposition-and-bsymbolic&#34;&gt;ELF interposition and -Bsymbolic | MaskRay&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&#34;https://man7.org/linux/man-pages/man3/dlsym.3.html&#34;&gt;dlsym(3) - Linux manual pagedlsym(3) - Linux manual page&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&#34;https://github.com/llvm/llvm-project/commit/7fb7330469af52ae1313b2b47c273e62c61a4dd5&#34;&gt;asan/tsan: weak interceptors · llvm/llvm-project@7fb7330 · GitHub&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;</description>
-    </item>
-    
-    <item>
-      <title>How Sanitizer Runtime Initialized</title>
-      <link>https://enna1.github.io/post/howsanitizerruntimeinit/</link>
-      <pubDate>Wed, 17 Aug 2022 00:00:00 +0000</pubDate>
-      <guid>https://enna1.github.io/post/howsanitizerruntimeinit/</guid>
-      <description>&lt;p&gt;本文分析了 sanitizer runtime 是如何做到在程序启动之前进行初始化的。&lt;/p&gt;
-&lt;h2 id=&#34;what-is-a-sanitizer&#34;&gt;What is a sanitizer?&lt;/h2&gt;
-&lt;p&gt;Sanitizers 是由 Google 开源的动态代码分析工具，包括：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;AddressSanitizer (ASan)&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;LeakSanitizer (LSan)&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;ThreadSanitizer (TSan)&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;UndefinedBehaviorSanitizer (UBSsan)&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;MemorySanitizer (MSan)&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;所有的 Sanitizer 都由编译时插桩和运行时库两部分组成，Sanitizer 自 Clang 3.1 和 GCC 4.8 开始被集成在 Clang 和 GCC 中。&lt;/p&gt;
-&lt;h2 id=&#34;sanitizer-runtime&#34;&gt;Sanitizer runtime&lt;/h2&gt;
-&lt;p&gt;我们先以 ASan 为例，简单看下 ASan runtime library 做了哪些事情。&lt;/p&gt;
-&lt;p&gt;ASan runtime 做的最主要的事情就是替换了 malloc/free, new/delete 的实现。这样应用程序的内存分配都由 ASan 实现的 allocator 来做，就能检测像 heap-use-after-free, double-free 这样的堆错误了。&lt;/p&gt;
-&lt;p&gt;程序在启用 ASan 后，virtual address space 会被分成 main application memory 和 shadow memory 两部分：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// Typical shadow mapping on Linux/x86_64 with SHADOW_OFFSET == 0x00007fff8000:
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// || `[0x10007fff8000, 0x7fffffffffff]` || HighMem    ||
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// || `[0x02008fff7000, 0x10007fff7fff]` || HighShadow ||
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// || `[0x00008fff7000, 0x02008fff6fff]` || ShadowGap  ||
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// || `[0x00007fff8000, 0x00008fff6fff]` || LowShadow  ||
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// || `[0x000000000000, 0x00007fff7fff]` || LowMem     ||
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;那么 ASan shadow memory 是什么时候初始化的？答：在程序启动之前 sanitizer runtime 初始化时做的。&lt;/p&gt;
-&lt;p&gt;另外，在使用 ASan 时，我们可以通过环境变量 ASAN_OPTIONS 来设置一些运行时参数，如：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;log_path，指定 sanitizer 的报告输出的位置&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;detect_stack_use_after_return，是否检测 stack-use-after-return 类型的 bug&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;alloc_dealloc_mismatch，是否检测 alloc-dealloc-mismatch 类型的 bug&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&amp;hellip;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;那么这些通过 ASAN_OPTIONS 设置的运行时参数又是在什么时候被解析生效的呢？答：也是在程序启动之前在 sanitizer runtime 初始化时做的。&lt;/p&gt;
-&lt;hr&gt;
-&lt;p&gt;ASan runtime 初始化的入口函数是 &lt;code&gt;__asan_init&lt;/code&gt;（感兴趣的话，可以仔细阅读下代码，本文不做此做详细的分析了。我这里截取了与 runtime flags 和 shadow memory 初始化相关的函数）。&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// compiler-rt/lib/asan/asan_rtl.cpp
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;__asan_init&lt;/span&gt;() {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  AsanActivate();
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  AsanInitInternal();
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;static&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;AsanInitInternal&lt;/span&gt;() {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  ...
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#75715e&#34;&gt;// Initialize flags. This must be done early, because most of the
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;  &lt;span style=&#34;color:#75715e&#34;&gt;// initialization steps look at flags().
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;  InitializeFlags();
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  ...
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#75715e&#34;&gt;// Set up the shadow memory.
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;  InitializeShadowMemory();
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  ...
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;那 sanitizer runtime 是怎么做到在程序启动之前执行初始化的相关代码的呢？一言以蔽之： &lt;code&gt;.init_array&lt;/code&gt;。下面我们详细看下是怎么实现的。&lt;/p&gt;
-&lt;h2 id=&#34;instrumentation&#34;&gt;Instrumentation&lt;/h2&gt;
-&lt;p&gt;首先看下 ASan 插装代码中与 sanitizer runtime 初始化相关的实现。&lt;/p&gt;
-&lt;p&gt;ASan 插装部分的代码实现位于 llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp。有如下代码片段（简化并省略部分代码）：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;const&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;char&lt;/span&gt; kAsanInitName[] &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;__asan_init&amp;#34;&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;const&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;char&lt;/span&gt; kAsanModuleCtorName[] &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;asan.module_ctor&amp;#34;&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;bool&lt;/span&gt; ModuleAddressSanitizer&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;instrumentModule(Module &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt;M) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#75715e&#34;&gt;// ...
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;  &lt;span style=&#34;color:#75715e&#34;&gt;// Create a module constructor.
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;  std&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;string AsanVersion &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; std&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;to_string(GetAsanVersion(M));
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  std&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;string VersionCheckName &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;      ClInsertVersionCheck &lt;span style=&#34;color:#f92672&#34;&gt;?&lt;/span&gt; (kAsanVersionCheckNamePrefix &lt;span style=&#34;color:#f92672&#34;&gt;+&lt;/span&gt; AsanVersion) &lt;span style=&#34;color:#f92672&#34;&gt;:&lt;/span&gt; &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;&amp;#34;&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  std&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;tie(AsanCtorFunction, std&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;ignore) &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;      createSanitizerCtorAndInitFunctions(M, kAsanModuleCtorName,
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;                                            kAsanInitName, &lt;span style=&#34;color:#75715e&#34;&gt;/*InitArgTypes=*/&lt;/span&gt;{},
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;                                            &lt;span style=&#34;color:#75715e&#34;&gt;/*InitArgs=*/&lt;/span&gt;{}, VersionCheckName);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#75715e&#34;&gt;// ...
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;const&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;uint64_t&lt;/span&gt; Priority &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; GetCtorAndDtorPriority(TargetTriple);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  appendToGlobalCtors(M, AsanCtorFunction, Priority);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; true;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;&lt;code&gt;ModuleAddressSanitizer::instrumentModule(Module &amp;amp;M)&lt;/code&gt; 的实现很简单：&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;
-&lt;p&gt;先调用 &lt;code&gt;createSanitizerCtorAndInitFunctions&lt;/code&gt; 创建了一个名为 &lt;code&gt;kAsanModuleCtorName&lt;/code&gt; 的函数，该函数的函数体很简单，就是对 &lt;code&gt;kAsanInitName&lt;/code&gt; 函数和 &lt;code&gt;VersionCheckName&lt;/code&gt; 函数的调用，其中因为 &lt;code&gt;kAsanInitName&lt;/code&gt; 函数没有任何的参数，所以 &lt;code&gt;InitArgTypes&lt;/code&gt; 和 &lt;code&gt;InitArgs&lt;/code&gt; 都是空。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;然后通过调用 &lt;code&gt;appendToGlobalCtors&lt;/code&gt; 将通过 &lt;code&gt;createSanitizerCtorAndInitFunctions&lt;/code&gt; 创建的函数，添加至 GlobalCtors 中。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;可能上述描述的还是不够清晰，下面结合一个例子来进一步说明。&lt;/p&gt;
-&lt;p&gt;考虑如下代码：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;main&lt;/span&gt;(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; argc, &lt;span style=&#34;color:#66d9ef&#34;&gt;char&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;**&lt;/span&gt;argv) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;array &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;new&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;[&lt;span style=&#34;color:#ae81ff&#34;&gt;100&lt;/span&gt;];
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;delete&lt;/span&gt; [] array;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; array[argc];  &lt;span style=&#34;color:#75715e&#34;&gt;// BOOM
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;通过 &lt;a href=&#34;https://godbolt.org/z/KxesEK3Wf&#34;&gt;Compiler Explorer&lt;/a&gt; 能很方便看到开启 ASan 后（-fsanitize=address）生成的 LLVM IR 是什么样（这里只截取了部分我们关注的 LLVM IR）：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-llvm&#34; data-lang=&#34;llvm&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;@llvm.global_ctors = &lt;span style=&#34;color:#66d9ef&#34;&gt;appending&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;global&lt;/span&gt; [&lt;span style=&#34;color:#ae81ff&#34;&gt;1&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;x&lt;/span&gt; { &lt;span style=&#34;color:#66d9ef&#34;&gt;i32&lt;/span&gt;, &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; ()*, &lt;span style=&#34;color:#66d9ef&#34;&gt;i8&lt;/span&gt;* }] [{ &lt;span style=&#34;color:#66d9ef&#34;&gt;i32&lt;/span&gt;, &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; ()*, &lt;span style=&#34;color:#66d9ef&#34;&gt;i8&lt;/span&gt;* } { &lt;span style=&#34;color:#66d9ef&#34;&gt;i32&lt;/span&gt; &lt;span style=&#34;color:#ae81ff&#34;&gt;1&lt;/span&gt;, &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; ()* @asan.module_ctor, &lt;span style=&#34;color:#66d9ef&#34;&gt;i8&lt;/span&gt;* &lt;span style=&#34;color:#66d9ef&#34;&gt;null&lt;/span&gt; }]
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;declare&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; @__asan_init()
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;declare&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; @__asan_version_mismatch_check_v8()
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;define&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;internal&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; @asan.module_ctor() {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;call&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; @__asan_init()
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;call&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; @__asan_version_mismatch_check_v8()
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;ret&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;开启 ASan 后，能明显的看到多了一个函数 &lt;code&gt;asan.module_ctor&lt;/code&gt;，多了一个全局变量 &lt;code&gt;@llvm.global_ctors&lt;/code&gt;。它们分别由 ASan 插装函数 &lt;code&gt;ModuleAddressSanitizer::instrumentModule(Module &amp;amp;M)&lt;/code&gt; 调用 &lt;code&gt;createSanitizerCtorAndInitFunctions&lt;/code&gt; 和 &lt;code&gt;appendToGlobalCtors&lt;/code&gt; 创建的。&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;asan.module_ctor&lt;/code&gt; 函数体由两个函数调用组成：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;code&gt;call void @__asan_init()&lt;/code&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;code&gt;call void @__asan_version_mismatch_check_v8()&lt;/code&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;函数 &lt;code&gt;__asan_init&lt;/code&gt; 是在 runtime libraray 中实现的，其代码实现我们前面已经给出了；函数 &lt;code&gt;__asan_version_mismatch_check_v8&lt;/code&gt; 也是在 runtime libaray 中实现的，顾名思义就是用于检测 asan instrumentation 和 runtime library 的版本是否匹配。&lt;/p&gt;
-&lt;p&gt;然后 &lt;code&gt;@llvm.global_ctors&lt;/code&gt; 中包含了函数 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的指针。&lt;/p&gt;
-&lt;p&gt;那么 &lt;code&gt;@llvm.global_ctors&lt;/code&gt; 是什么、是怎么实现的？&lt;/p&gt;
-&lt;p&gt;根据 &lt;a href=&#34;https://llvm.org/docs/LangRef.html#the-llvm-global-ctors-global-variable&#34;&gt;https://llvm.org/docs/LangRef.html#the-llvm-global-ctors-global-variable&lt;/a&gt; ：&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;The &lt;code&gt;@llvm.global_ctors&lt;/code&gt; array contains a list of constructor functions, priorities, and an associated global or function. The functions referenced by this array will be called in ascending order of priority (i.e. lowest first) when the module is loaded. The order of functions with the same priority is not defined.&lt;/p&gt;
-&lt;p&gt;If the third field is non-null, and points to a global variable or function, the initializer function will only run if the associated data from the current module is not discarded. On ELF the referenced global variable or function must be in a comdat.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;即 &lt;code&gt;@llvm.global_ctors&lt;/code&gt; 是一个数组，包含了一些 constructor functions。这些 constructor functions 会按照 priority 升序在 module 被加载时被调用。&lt;/p&gt;
-&lt;p&gt;但是 llvm 文档中并没有说 &lt;code&gt;@llvm.global_ctors&lt;/code&gt; 是如何做到 “constructor functions 在 module 被加载时被调用“ 的。&lt;/p&gt;
-&lt;h2 id=&#34;init_array&#34;&gt;.init_array&lt;/h2&gt;
-&lt;p&gt;实际上 LLVM IR 中的 &lt;code&gt;@llvm.global_ctors&lt;/code&gt; 在生成汇编代码时，对应的是 &lt;code&gt;.init_array&lt;/code&gt;。&lt;/p&gt;
-&lt;p&gt;我们还是通过前面用到的示例代码来说明：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;main&lt;/span&gt;(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; argc, &lt;span style=&#34;color:#66d9ef&#34;&gt;char&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;**&lt;/span&gt;argv) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;array &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;new&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;[&lt;span style=&#34;color:#ae81ff&#34;&gt;100&lt;/span&gt;];
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;delete&lt;/span&gt; [] array;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; array[argc];  &lt;span style=&#34;color:#75715e&#34;&gt;// BOOM
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;通过 &lt;code&gt;clang++ -fsanitize=address test.cpp -S&lt;/code&gt; 可以得到开启 ASan 后生成的汇编代码（我们这里省略了 main 函数的汇编代码）：&lt;/p&gt;
-&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;    .section    .text.asan.module_ctor,&amp;#34;axR&amp;#34;,@progbits
-    .p2align    4, 0x90    # -- Begin function asan.module_ctor
-    .type    asan.module_ctor,@function
-asan.module_ctor:    # @asan.module_ctor
-    pushq    %rbp
-    movq    %rsp, %rbp
-    callq    __asan_init@PLT
-    callq    __asan_version_mismatch_check_v8@PLT
-    popq    %rbp
-    retq
-
-    .section    .init_array.1,&amp;#34;aw&amp;#34;,@init_array
-    .p2align    3
-    .quad    asan.module_ctor
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;首先是 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的汇编实现，没什么特别：就是两条 call 指令，分别对函数 &lt;code&gt;__asan_init&lt;/code&gt; 和 &lt;code&gt;__asan_version_mismatch_check_v8&lt;/code&gt; 的调用。&lt;/p&gt;
-&lt;p&gt;需要注意的是 &lt;code&gt;.init_array.1 section&lt;/code&gt;，存储了函数 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的指针。&lt;code&gt;.init_array.1&lt;/code&gt; 中的 &lt;strong&gt;&amp;quot;.1&amp;quot;&lt;/strong&gt; 和 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的 priority 有关，因为 &lt;code&gt;{ i32 **1**, void ()* @asan.module_ctor, i8* null }&lt;/code&gt; 即 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的 priority 是 1，所以这里就是 &lt;code&gt;.init_array.1&lt;/code&gt;&lt;/p&gt;
-&lt;p&gt;关于 &lt;code&gt;.init_array&lt;/code&gt;，maskray 的这篇文章写的很详细 &lt;a href=&#34;https://maskray.me/blog/2021-11-07-init-ctors-init-array&#34;&gt;https://maskray.me/blog/2021-11-07-init-ctors-init-array&lt;/a&gt; 。&lt;/p&gt;
-&lt;p&gt;在 ELF 文件被 loader 加载后，会先执行 .init_array section 中的函数，再执行 main 函数。这样就达到了在程序启动之前执行 sanitizer runtime 初始化函数的效果。&lt;/p&gt;
-&lt;p&gt;&lt;img src=&#34;https://enna1.github.io/blog/sanitizer-runtime-init/2022-08-17-20-05-31-image.png&#34; alt=&#34;&#34;&gt;&lt;/p&gt;
-&lt;h2 id=&#34;summary&#34;&gt;Summary&lt;/h2&gt;
-&lt;p&gt;总结一下，sanitizer runtime 是如何做到在程序启动之前进行初始化的，以 ASan 为例：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;首先 sanitizer runtime library 中存在一个初始化函数 &lt;code&gt;__asan_init&lt;/code&gt;，来做 ASan runtime 的初始化工作，如：初始化 shadow memory、初始化一些运行时参数。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;然后在开启 ASan ，编译时插装这个阶段，会创建一个名为 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的函数，该函数会调用 &lt;code&gt;__asan_init&lt;/code&gt;，然后将 &lt;code&gt;asan.module_ctor&lt;/code&gt; 的函数指针加入到 &lt;code&gt;@llvm.global_ctors&lt;/code&gt; 中。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;在生成汇编代码时，会将 &lt;code&gt;@llvm.global_ctors&lt;/code&gt; 中的函数指针放在 &lt;code&gt;.init_array&lt;/code&gt; section 中。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;最后在 loader 加载 ELF 文件时，会先执行 &lt;code&gt;.init_array&lt;/code&gt; 中函数指针指向的函数，然后再执行 &lt;code&gt;main()&lt;/code&gt; 函数，这样就做到在程序启动之前初始化 ASan runtime 了。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2 id=&#34;ps&#34;&gt;P.S.&lt;/h2&gt;
-&lt;p&gt;C/C++ 面试有一个常见问题就是问如何实现在 &lt;code&gt;main()&lt;/code&gt; 函数执行之前，执行一条语句： &lt;a href=&#34;https://www.zhihu.com/question/26031933&#34;&gt;https://www.zhihu.com/question/26031933&lt;/a&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;一种解决方案是通过 &lt;code&gt;__attribute((constructor))&lt;/code&gt; 来修饰相关函数，实现该函数在 &lt;code&gt;main()&lt;/code&gt; 函数执行之前被执行。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;还有一种方案是利用全局变量的构造函数在 &lt;code&gt;main()&lt;/code&gt; 函数执行之前执行实现该效果。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;实际上述两种方案在汇编的角度来看是一样的，都是通过 &lt;code&gt;.init_array&lt;/code&gt; section 来实现的。&lt;/p&gt;
-&lt;h2 id=&#34;reference&#34;&gt;Reference&lt;/h2&gt;
-&lt;ol&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&#34;http://dbp-consulting.com/tutorials/debugging/linuxProgramStartup.html&#34;&gt;http://dbp-consulting.com/tutorials/debugging/linuxProgramStartup.html&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&#34;https://maskray.me/blog/2021-11-07-init-ctors-init-array&#34;&gt;https://maskray.me/blog/2021-11-07-init-ctors-init-array&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;</description>
-    </item>
-    
-    <item>
-      <title>How To Write A Dumb Sanitizer</title>
-      <link>https://enna1.github.io/post/dumbsanitizerhowto/</link>
-      <pubDate>Thu, 02 Jun 2022 00:00:00 +0000</pubDate>
-      <guid>https://enna1.github.io/post/dumbsanitizerhowto/</guid>
-      <description>&lt;p&gt;本文描述了如何实现一个简单的 sanitizer 。&lt;/p&gt;
-&lt;p&gt;本文所实现的 DumbSanitizer 的完整代码见 &lt;a href=&#34;https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16&#34;&gt;DumbSanitizer.patch · GitHub&lt;/a&gt;，基于 llvm 14.0.4。&lt;/p&gt;
-&lt;h2 id=&#34;introduction--what-is-a-sanitizer&#34;&gt;Introduction — What is a sanitizer?&lt;/h2&gt;
-&lt;p&gt;Sanitizers 是由 Google 开源的动态代码分析工具，包括：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;AddressSanitizer (ASan)&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;LeakSanitizer (LSan)&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;ThreadSanitizer (TSan)&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;UndefinedBehaviorSanitizer (UBSsan)&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;MemorySanitizer (MSan)&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;所有的 Sanitizer 都由编译时插桩和运行时库两部分组成，Sanitizer 自 Clang 3.1 和 GCC 4.8 开始被集成在 Clang 和 GCC 中。&lt;/p&gt;
-&lt;p&gt;例如 ASan 是用于检测 Use-after-free, heap-buffer-overflow, stack-buffer-overflow 等内存错误的。对于如下代码：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// clang -O0 -g -fsanitize=address test.cpp &amp;amp;&amp;amp; ./a.out
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;main&lt;/span&gt;(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; argc, &lt;span style=&#34;color:#66d9ef&#34;&gt;char&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;**&lt;/span&gt;argv) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;array &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;new&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt;[&lt;span style=&#34;color:#ae81ff&#34;&gt;100&lt;/span&gt;];
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;delete&lt;/span&gt; [] array;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; array[argc];  &lt;span style=&#34;color:#75715e&#34;&gt;// BOOM
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;使用命令 &lt;code&gt;clang -O0 -g -fsanitize=address test.cpp&lt;/code&gt; 就可以得到开启 ASan 编译后的产物，然后运行编译产物 a.out 就会得到如下类似输入，说明在运行 a.out 时发现了一个 UAF：&lt;/p&gt;
-&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;=================================================================
+...
+3008: 00000000000fd600 606 FUNC WEAK DEFAULT 12 malloc
+4519: 00000000000fd600 606 FUNC GLOBAL DEFAULT 12 __interceptor_malloc
+&lt;/code>&lt;/pre>&lt;h2 id="ps2">P.S.2&lt;/h2>
+&lt;p>熟悉在 Linux 下 sanitizer interceptor 机制的底层原理后，就很容易明白使用 sanitizer 时遇到的一些问题或坑为什么会是这样的。例如：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>&lt;a href="https://github.com/google/sanitizers/issues/611">Address Sanitizer fails to intercept function in shared library opened with RTLD_DEEPBIND · Issue #611 · google/sanitizers · GitHub&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;a href="https://github.com/google/sanitizers/issues/796">ASan runtime does not come first in initial library list; you should either link runtime to your application or manually preload it with LD_PRELOAD. · Issue #796 · google/sanitizers · GitHub&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;a href="https://stackoverflow.com/questions/66971217/is-it-okay-if-asan-runtime-loaded-as-second-library">address sanitizer - Is it okay if ASAN runtime loaded as second library? - Stack Overflow&lt;/a>&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;h2 id="references">References&lt;/h2>
+&lt;ol>
+&lt;li>
+&lt;p>&lt;a href="https://maskray.me/blog/2021-05-16-elf-interposition-and-bsymbolic">ELF interposition and -Bsymbolic | MaskRay&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;a href="https://man7.org/linux/man-pages/man3/dlsym.3.html">dlsym(3) - Linux manual pagedlsym(3) - Linux manual page&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;a href="https://github.com/llvm/llvm-project/commit/7fb7330469af52ae1313b2b47c273e62c61a4dd5">asan/tsan: weak interceptors · llvm/llvm-project@7fb7330 · GitHub&lt;/a>&lt;/p>
+&lt;/li>
+&lt;/ol></description></item><item><title>How Sanitizer Runtime Initialized</title><link>https://enna1.github.io/post/howsanitizerruntimeinit/</link><pubDate>Wed, 17 Aug 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/howsanitizerruntimeinit/</guid><description>&lt;p>本文分析了 sanitizer runtime 是如何做到在程序启动之前进行初始化的。&lt;/p>
+&lt;h2 id="what-is-a-sanitizer">What is a sanitizer?&lt;/h2>
+&lt;p>Sanitizers 是由 Google 开源的动态代码分析工具，包括：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>AddressSanitizer (ASan)&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>LeakSanitizer (LSan)&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>ThreadSanitizer (TSan)&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>UndefinedBehaviorSanitizer (UBSsan)&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>MemorySanitizer (MSan)&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>所有的 Sanitizer 都由编译时插桩和运行时库两部分组成，Sanitizer 自 Clang 3.1 和 GCC 4.8 开始被集成在 Clang 和 GCC 中。&lt;/p>
+&lt;h2 id="sanitizer-runtime">Sanitizer runtime&lt;/h2>
+&lt;p>我们先以 ASan 为例，简单看下 ASan runtime library 做了哪些事情。&lt;/p>
+&lt;p>ASan runtime 做的最主要的事情就是替换了 malloc/free, new/delete 的实现。这样应用程序的内存分配都由 ASan 实现的 allocator 来做，就能检测像 heap-use-after-free, double-free 这样的堆错误了。&lt;/p>
+&lt;p>程序在启用 ASan 后，virtual address space 会被分成 main application memory 和 shadow memory 两部分：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// Typical shadow mapping on Linux/x86_64 with SHADOW_OFFSET == 0x00007fff8000:
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// || `[0x10007fff8000, 0x7fffffffffff]` || HighMem ||
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// || `[0x02008fff7000, 0x10007fff7fff]` || HighShadow ||
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// || `[0x00008fff7000, 0x02008fff6fff]` || ShadowGap ||
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// || `[0x00007fff8000, 0x00008fff6fff]` || LowShadow ||
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// || `[0x000000000000, 0x00007fff7fff]` || LowMem ||
+&lt;/span>&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>那么 ASan shadow memory 是什么时候初始化的？答：在程序启动之前 sanitizer runtime 初始化时做的。&lt;/p>
+&lt;p>另外，在使用 ASan 时，我们可以通过环境变量 ASAN_OPTIONS 来设置一些运行时参数，如：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>log_path，指定 sanitizer 的报告输出的位置&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>detect_stack_use_after_return，是否检测 stack-use-after-return 类型的 bug&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>alloc_dealloc_mismatch，是否检测 alloc-dealloc-mismatch 类型的 bug&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&amp;hellip;&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>那么这些通过 ASAN_OPTIONS 设置的运行时参数又是在什么时候被解析生效的呢？答：也是在程序启动之前在 sanitizer runtime 初始化时做的。&lt;/p>
+&lt;hr>
+&lt;p>ASan runtime 初始化的入口函数是 &lt;code>__asan_init&lt;/code>（感兴趣的话，可以仔细阅读下代码，本文不做此做详细的分析了。我这里截取了与 runtime flags 和 shadow memory 初始化相关的函数）。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// compiler-rt/lib/asan/asan_rtl.cpp
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#a6e22e">__asan_init&lt;/span>() {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> AsanActivate();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> AsanInitInternal();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">static&lt;/span> &lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#a6e22e">AsanInitInternal&lt;/span>() {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> ...
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e">// Initialize flags. This must be done early, because most of the
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> &lt;span style="color:#75715e">// initialization steps look at flags().
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> InitializeFlags();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> ...
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e">// Set up the shadow memory.
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> InitializeShadowMemory();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> ...
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>那 sanitizer runtime 是怎么做到在程序启动之前执行初始化的相关代码的呢？一言以蔽之： &lt;code>.init_array&lt;/code>。下面我们详细看下是怎么实现的。&lt;/p>
+&lt;h2 id="instrumentation">Instrumentation&lt;/h2>
+&lt;p>首先看下 ASan 插装代码中与 sanitizer runtime 初始化相关的实现。&lt;/p>
+&lt;p>ASan 插装部分的代码实现位于 llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp。有如下代码片段（简化并省略部分代码）：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// llvm/lib/Transforms/Instrumentation/AddressSanitizer.cpp
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">const&lt;/span> &lt;span style="color:#66d9ef">char&lt;/span> kAsanInitName[] &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#e6db74">&amp;#34;__asan_init&amp;#34;&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">const&lt;/span> &lt;span style="color:#66d9ef">char&lt;/span> kAsanModuleCtorName[] &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#e6db74">&amp;#34;asan.module_ctor&amp;#34;&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">bool&lt;/span> ModuleAddressSanitizer&lt;span style="color:#f92672">::&lt;/span>instrumentModule(Module &lt;span style="color:#f92672">&amp;amp;&lt;/span>M) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e">// ...
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> &lt;span style="color:#75715e">// Create a module constructor.
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> std&lt;span style="color:#f92672">::&lt;/span>string AsanVersion &lt;span style="color:#f92672">=&lt;/span> std&lt;span style="color:#f92672">::&lt;/span>to_string(GetAsanVersion(M));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> std&lt;span style="color:#f92672">::&lt;/span>string VersionCheckName &lt;span style="color:#f92672">=&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> ClInsertVersionCheck &lt;span style="color:#f92672">?&lt;/span> (kAsanVersionCheckNamePrefix &lt;span style="color:#f92672">+&lt;/span> AsanVersion) &lt;span style="color:#f92672">:&lt;/span> &lt;span style="color:#e6db74">&amp;#34;&amp;#34;&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> std&lt;span style="color:#f92672">::&lt;/span>tie(AsanCtorFunction, std&lt;span style="color:#f92672">::&lt;/span>ignore) &lt;span style="color:#f92672">=&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> createSanitizerCtorAndInitFunctions(M, kAsanModuleCtorName,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> kAsanInitName, &lt;span style="color:#75715e">/*InitArgTypes=*/&lt;/span>{},
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e">/*InitArgs=*/&lt;/span>{}, VersionCheckName);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e">// ...
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span> &lt;span style="color:#66d9ef">const&lt;/span> &lt;span style="color:#66d9ef">uint64_t&lt;/span> Priority &lt;span style="color:#f92672">=&lt;/span> GetCtorAndDtorPriority(TargetTriple);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> appendToGlobalCtors(M, AsanCtorFunction, Priority);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> true;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>&lt;code>ModuleAddressSanitizer::instrumentModule(Module &amp;amp;M)&lt;/code> 的实现很简单：&lt;/p>
+&lt;ol>
+&lt;li>
+&lt;p>先调用 &lt;code>createSanitizerCtorAndInitFunctions&lt;/code> 创建了一个名为 &lt;code>kAsanModuleCtorName&lt;/code> 的函数，该函数的函数体很简单，就是对 &lt;code>kAsanInitName&lt;/code> 函数和 &lt;code>VersionCheckName&lt;/code> 函数的调用，其中因为 &lt;code>kAsanInitName&lt;/code> 函数没有任何的参数，所以 &lt;code>InitArgTypes&lt;/code> 和 &lt;code>InitArgs&lt;/code> 都是空。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>然后通过调用 &lt;code>appendToGlobalCtors&lt;/code> 将通过 &lt;code>createSanitizerCtorAndInitFunctions&lt;/code> 创建的函数，添加至 GlobalCtors 中。&lt;/p>
+&lt;/li>
+&lt;/ol>
+&lt;p>可能上述描述的还是不够清晰，下面结合一个例子来进一步说明。&lt;/p>
+&lt;p>考虑如下代码：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#a6e22e">main&lt;/span>(&lt;span style="color:#66d9ef">int&lt;/span> argc, &lt;span style="color:#66d9ef">char&lt;/span> &lt;span style="color:#f92672">**&lt;/span>argv) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#f92672">*&lt;/span>array &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#66d9ef">new&lt;/span> &lt;span style="color:#66d9ef">int&lt;/span>[&lt;span style="color:#ae81ff">100&lt;/span>];
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">delete&lt;/span> [] array;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> array[argc]; &lt;span style="color:#75715e">// BOOM
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>通过 &lt;a href="https://godbolt.org/z/KxesEK3Wf">Compiler Explorer&lt;/a> 能很方便看到开启 ASan 后（-fsanitize=address）生成的 LLVM IR 是什么样（这里只截取了部分我们关注的 LLVM IR）：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-llvm" data-lang="llvm">&lt;span style="display:flex;">&lt;span>@llvm.global_ctors = &lt;span style="color:#66d9ef">appending&lt;/span> &lt;span style="color:#66d9ef">global&lt;/span> [&lt;span style="color:#ae81ff">1&lt;/span> &lt;span style="color:#66d9ef">x&lt;/span> { &lt;span style="color:#66d9ef">i32&lt;/span>, &lt;span style="color:#66d9ef">void&lt;/span> ()*, &lt;span style="color:#66d9ef">i8&lt;/span>* }] [{ &lt;span style="color:#66d9ef">i32&lt;/span>, &lt;span style="color:#66d9ef">void&lt;/span> ()*, &lt;span style="color:#66d9ef">i8&lt;/span>* } { &lt;span style="color:#66d9ef">i32&lt;/span> &lt;span style="color:#ae81ff">1&lt;/span>, &lt;span style="color:#66d9ef">void&lt;/span> ()* @asan.module_ctor, &lt;span style="color:#66d9ef">i8&lt;/span>* &lt;span style="color:#66d9ef">null&lt;/span> }]
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">declare&lt;/span> &lt;span style="color:#66d9ef">void&lt;/span> @__asan_init()
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">declare&lt;/span> &lt;span style="color:#66d9ef">void&lt;/span> @__asan_version_mismatch_check_v8()
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">define&lt;/span> &lt;span style="color:#66d9ef">internal&lt;/span> &lt;span style="color:#66d9ef">void&lt;/span> @asan.module_ctor() {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">call&lt;/span> &lt;span style="color:#66d9ef">void&lt;/span> @__asan_init()
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">call&lt;/span> &lt;span style="color:#66d9ef">void&lt;/span> @__asan_version_mismatch_check_v8()
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">ret&lt;/span> &lt;span style="color:#66d9ef">void&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>开启 ASan 后，能明显的看到多了一个函数 &lt;code>asan.module_ctor&lt;/code>，多了一个全局变量 &lt;code>@llvm.global_ctors&lt;/code>。它们分别由 ASan 插装函数 &lt;code>ModuleAddressSanitizer::instrumentModule(Module &amp;amp;M)&lt;/code> 调用 &lt;code>createSanitizerCtorAndInitFunctions&lt;/code> 和 &lt;code>appendToGlobalCtors&lt;/code> 创建的。&lt;/p>
+&lt;p>&lt;code>asan.module_ctor&lt;/code> 函数体由两个函数调用组成：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>&lt;code>call void @__asan_init()&lt;/code>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;code>call void @__asan_version_mismatch_check_v8()&lt;/code>&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>函数 &lt;code>__asan_init&lt;/code> 是在 runtime libraray 中实现的，其代码实现我们前面已经给出了；函数 &lt;code>__asan_version_mismatch_check_v8&lt;/code> 也是在 runtime libaray 中实现的，顾名思义就是用于检测 asan instrumentation 和 runtime library 的版本是否匹配。&lt;/p>
+&lt;p>然后 &lt;code>@llvm.global_ctors&lt;/code> 中包含了函数 &lt;code>asan.module_ctor&lt;/code> 的指针。&lt;/p>
+&lt;p>那么 &lt;code>@llvm.global_ctors&lt;/code> 是什么、是怎么实现的？&lt;/p>
+&lt;p>根据 &lt;a href="https://llvm.org/docs/LangRef.html#the-llvm-global-ctors-global-variable">https://llvm.org/docs/LangRef.html#the-llvm-global-ctors-global-variable&lt;/a> ：&lt;/p>
+&lt;blockquote>
+&lt;p>The &lt;code>@llvm.global_ctors&lt;/code> array contains a list of constructor functions, priorities, and an associated global or function. The functions referenced by this array will be called in ascending order of priority (i.e. lowest first) when the module is loaded. The order of functions with the same priority is not defined.&lt;/p>
+&lt;p>If the third field is non-null, and points to a global variable or function, the initializer function will only run if the associated data from the current module is not discarded. On ELF the referenced global variable or function must be in a comdat.&lt;/p>
+&lt;/blockquote>
+&lt;p>即 &lt;code>@llvm.global_ctors&lt;/code> 是一个数组，包含了一些 constructor functions。这些 constructor functions 会按照 priority 升序在 module 被加载时被调用。&lt;/p>
+&lt;p>但是 llvm 文档中并没有说 &lt;code>@llvm.global_ctors&lt;/code> 是如何做到 “constructor functions 在 module 被加载时被调用“ 的。&lt;/p>
+&lt;h2 id="init_array">.init_array&lt;/h2>
+&lt;p>实际上 LLVM IR 中的 &lt;code>@llvm.global_ctors&lt;/code> 在生成汇编代码时，对应的是 &lt;code>.init_array&lt;/code>。&lt;/p>
+&lt;p>我们还是通过前面用到的示例代码来说明：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#a6e22e">main&lt;/span>(&lt;span style="color:#66d9ef">int&lt;/span> argc, &lt;span style="color:#66d9ef">char&lt;/span> &lt;span style="color:#f92672">**&lt;/span>argv) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#f92672">*&lt;/span>array &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#66d9ef">new&lt;/span> &lt;span style="color:#66d9ef">int&lt;/span>[&lt;span style="color:#ae81ff">100&lt;/span>];
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">delete&lt;/span> [] array;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> array[argc]; &lt;span style="color:#75715e">// BOOM
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>通过 &lt;code>clang++ -fsanitize=address test.cpp -S&lt;/code> 可以得到开启 ASan 后生成的汇编代码（我们这里省略了 main 函数的汇编代码）：&lt;/p>
+&lt;pre tabindex="0">&lt;code> .section .text.asan.module_ctor,&amp;#34;axR&amp;#34;,@progbits
+.p2align 4, 0x90 # -- Begin function asan.module_ctor
+.type asan.module_ctor,@function
+asan.module_ctor: # @asan.module_ctor
+pushq %rbp
+movq %rsp, %rbp
+callq __asan_init@PLT
+callq __asan_version_mismatch_check_v8@PLT
+popq %rbp
+retq
+.section .init_array.1,&amp;#34;aw&amp;#34;,@init_array
+.p2align 3
+.quad asan.module_ctor
+&lt;/code>&lt;/pre>&lt;p>首先是 &lt;code>asan.module_ctor&lt;/code> 的汇编实现，没什么特别：就是两条 call 指令，分别对函数 &lt;code>__asan_init&lt;/code> 和 &lt;code>__asan_version_mismatch_check_v8&lt;/code> 的调用。&lt;/p>
+&lt;p>需要注意的是 &lt;code>.init_array.1 section&lt;/code>，存储了函数 &lt;code>asan.module_ctor&lt;/code> 的指针。&lt;code>.init_array.1&lt;/code> 中的 &lt;strong>&amp;quot;.1&amp;quot;&lt;/strong> 和 &lt;code>asan.module_ctor&lt;/code> 的 priority 有关，因为 &lt;code>{ i32 **1**, void ()* @asan.module_ctor, i8* null }&lt;/code> 即 &lt;code>asan.module_ctor&lt;/code> 的 priority 是 1，所以这里就是 &lt;code>.init_array.1&lt;/code>&lt;/p>
+&lt;p>关于 &lt;code>.init_array&lt;/code>，maskray 的这篇文章写的很详细 &lt;a href="https://maskray.me/blog/2021-11-07-init-ctors-init-array">https://maskray.me/blog/2021-11-07-init-ctors-init-array&lt;/a> 。&lt;/p>
+&lt;p>在 ELF 文件被 loader 加载后，会先执行 .init_array section 中的函数，再执行 main 函数。这样就达到了在程序启动之前执行 sanitizer runtime 初始化函数的效果。&lt;/p>
+&lt;p>&lt;img src="https://enna1.github.io/blog/sanitizer-runtime-init/2022-08-17-20-05-31-image.png" alt="">&lt;/p>
+&lt;h2 id="summary">Summary&lt;/h2>
+&lt;p>总结一下，sanitizer runtime 是如何做到在程序启动之前进行初始化的，以 ASan 为例：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>首先 sanitizer runtime library 中存在一个初始化函数 &lt;code>__asan_init&lt;/code>，来做 ASan runtime 的初始化工作，如：初始化 shadow memory、初始化一些运行时参数。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>然后在开启 ASan ，编译时插装这个阶段，会创建一个名为 &lt;code>asan.module_ctor&lt;/code> 的函数，该函数会调用 &lt;code>__asan_init&lt;/code>，然后将 &lt;code>asan.module_ctor&lt;/code> 的函数指针加入到 &lt;code>@llvm.global_ctors&lt;/code> 中。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>在生成汇编代码时，会将 &lt;code>@llvm.global_ctors&lt;/code> 中的函数指针放在 &lt;code>.init_array&lt;/code> section 中。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>最后在 loader 加载 ELF 文件时，会先执行 &lt;code>.init_array&lt;/code> 中函数指针指向的函数，然后再执行 &lt;code>main()&lt;/code> 函数，这样就做到在程序启动之前初始化 ASan runtime 了。&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;h2 id="ps">P.S.&lt;/h2>
+&lt;p>C/C++ 面试有一个常见问题就是问如何实现在 &lt;code>main()&lt;/code> 函数执行之前，执行一条语句： &lt;a href="https://www.zhihu.com/question/26031933">https://www.zhihu.com/question/26031933&lt;/a>&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>一种解决方案是通过 &lt;code>__attribute((constructor))&lt;/code> 来修饰相关函数，实现该函数在 &lt;code>main()&lt;/code> 函数执行之前被执行。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>还有一种方案是利用全局变量的构造函数在 &lt;code>main()&lt;/code> 函数执行之前执行实现该效果。&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>实际上述两种方案在汇编的角度来看是一样的，都是通过 &lt;code>.init_array&lt;/code> section 来实现的。&lt;/p>
+&lt;h2 id="reference">Reference&lt;/h2>
+&lt;ol>
+&lt;li>
+&lt;p>&lt;a href="http://dbp-consulting.com/tutorials/debugging/linuxProgramStartup.html">http://dbp-consulting.com/tutorials/debugging/linuxProgramStartup.html&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;a href="https://maskray.me/blog/2021-11-07-init-ctors-init-array">https://maskray.me/blog/2021-11-07-init-ctors-init-array&lt;/a>&lt;/p>
+&lt;/li>
+&lt;/ol></description></item><item><title>How To Write A Dumb Sanitizer</title><link>https://enna1.github.io/post/dumbsanitizerhowto/</link><pubDate>Thu, 02 Jun 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/dumbsanitizerhowto/</guid><description>&lt;p>本文描述了如何实现一个简单的 sanitizer 。&lt;/p>
+&lt;p>本文所实现的 DumbSanitizer 的完整代码见 &lt;a href="https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16">DumbSanitizer.patch · GitHub&lt;/a>，基于 llvm 14.0.4。&lt;/p>
+&lt;h2 id="introduction--what-is-a-sanitizer">Introduction — What is a sanitizer?&lt;/h2>
+&lt;p>Sanitizers 是由 Google 开源的动态代码分析工具，包括：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>AddressSanitizer (ASan)&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>LeakSanitizer (LSan)&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>ThreadSanitizer (TSan)&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>UndefinedBehaviorSanitizer (UBSsan)&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>MemorySanitizer (MSan)&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>所有的 Sanitizer 都由编译时插桩和运行时库两部分组成，Sanitizer 自 Clang 3.1 和 GCC 4.8 开始被集成在 Clang 和 GCC 中。&lt;/p>
+&lt;p>例如 ASan 是用于检测 Use-after-free, heap-buffer-overflow, stack-buffer-overflow 等内存错误的。对于如下代码：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// clang -O0 -g -fsanitize=address test.cpp &amp;amp;&amp;amp; ./a.out
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>&lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#a6e22e">main&lt;/span>(&lt;span style="color:#66d9ef">int&lt;/span> argc, &lt;span style="color:#66d9ef">char&lt;/span> &lt;span style="color:#f92672">**&lt;/span>argv) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#f92672">*&lt;/span>array &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#66d9ef">new&lt;/span> &lt;span style="color:#66d9ef">int&lt;/span>[&lt;span style="color:#ae81ff">100&lt;/span>];
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">delete&lt;/span> [] array;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> array[argc]; &lt;span style="color:#75715e">// BOOM
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>使用命令 &lt;code>clang -O0 -g -fsanitize=address test.cpp&lt;/code> 就可以得到开启 ASan 编译后的产物，然后运行编译产物 a.out 就会得到如下类似输入，说明在运行 a.out 时发现了一个 UAF：&lt;/p>
+&lt;pre tabindex="0">&lt;code>=================================================================
 ==6254== ERROR: AddressSanitizer: heap-use-after-free on address 0x603e0001fc64 at pc 0x417f6a bp 0x7fff626b3250 sp 0x7fff626b3248
 READ of size 4 at 0x603e0001fc64 thread T0
-    #0 0x417f69 in main test.cpp:5
-    #1 0x7fae62b5076c (/lib/x86_64-linux-gnu/libc.so.6+0x2176c)
-    #2 0x417e54 (a.out+0x417e54)
+#0 0x417f69 in main test.cpp:5
+#1 0x7fae62b5076c (/lib/x86_64-linux-gnu/libc.so.6+0x2176c)
+#2 0x417e54 (a.out+0x417e54)
 0x603e0001fc64 is located 4 bytes inside of 400-byte region [0x603e0001fc60,0x603e0001fdf0)
 freed by thread T0 here:
-    #0 0x40d4d2 in operator delete[](void*) llvm/projects/compiler-rt/lib/asan/asan_new_delete.cc:61
-    #1 0x417f2e in main test.cpp:4
+#0 0x40d4d2 in operator delete[](void*) llvm/projects/compiler-rt/lib/asan/asan_new_delete.cc:61
+#1 0x417f2e in main test.cpp:4
 previously allocated by thread T0 here:
-    #0 0x40d312 in operator new[](unsigned long) llvm/projects/compiler-rt/lib/asan/asan_new_delete.cc:46
-    #1 0x417f1e in main test.cpp:3
+#0 0x40d312 in operator new[](unsigned long) llvm/projects/compiler-rt/lib/asan/asan_new_delete.cc:46
+#1 0x417f1e in main test.cpp:3
 Shadow bytes around the buggy address:
-  0x1c07c0003f30: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
-  0x1c07c0003f40: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
-  0x1c07c0003f50: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
-  0x1c07c0003f60: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
-  0x1c07c0003f70: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+0x1c07c0003f30: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+0x1c07c0003f40: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+0x1c07c0003f50: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+0x1c07c0003f60: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+0x1c07c0003f70: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
 =&amp;gt;0x1c07c0003f80: fa fa fa fa fa fa fa fa fa fa fa fa[fd]fd fd fd
-  0x1c07c0003f90: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
-  0x1c07c0003fa0: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
-  0x1c07c0003fb0: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fa fa
-  0x1c07c0003fc0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
-  0x1c07c0003fd0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+0x1c07c0003f90: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+0x1c07c0003fa0: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd fd
+0x1c07c0003fb0: fd fd fd fd fd fd fd fd fd fd fd fd fd fd fa fa
+0x1c07c0003fc0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+0x1c07c0003fd0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
 Shadow byte legend (one shadow byte represents 8 application bytes):
-  Addressable:           00
-  Partially addressable: 01 02 03 04 05 06 07
-  Heap left redzone:     fa
-  Heap righ redzone:     fb
-  Freed Heap region:     fd
-  Stack left redzone:    f1
-  Stack mid redzone:     f2
-  Stack right redzone:   f3
-  Stack partial redzone: f4
-  Stack after return:    f5
-  Stack use after scope: f8
-  Global redzone:        f9
-  Global init order:     f6
-  Poisoned by user:      f7
-  ASan internal:         fe
+Addressable: 00
+Partially addressable: 01 02 03 04 05 06 07
+Heap left redzone: fa
+Heap righ redzone: fb
+Freed Heap region: fd
+Stack left redzone: f1
+Stack mid redzone: f2
+Stack right redzone: f3
+Stack partial redzone: f4
+Stack after return: f5
+Stack use after scope: f8
+Global redzone: f9
+Global init order: f6
+Poisoned by user: f7
+ASan internal: fe
 ==6254== ABORTING
-&lt;/code&gt;&lt;/pre&gt;&lt;h2 id=&#34;quick-start--writing-dumb-sanitizer&#34;&gt;Quick Start — Writing dumb sanitizer&lt;/h2&gt;
-&lt;p&gt;接下来这一节我们就来讲解下怎么实现一个简单的 Sanitizer（本文称之为 DumbSanitizer 或 DbSan）。我们的 DumbSanitizer 实现下述功能：对于程序中的每一个变量，我们都统计该变量在程序运行中被访问了多少次，并且在程序退出时打印出访问次数最多的变量。&lt;/p&gt;
-&lt;h3 id=&#34;compile-llvm-project-with-compiler-rt&#34;&gt;Compile llvm project with compiler-rt&lt;/h3&gt;
-&lt;p&gt;如何编译 llvm 可以参考 &lt;a href=&#34;https://llvm.org/docs/CMake.html#quick-start&#34;&gt;Building LLVM with CMake&lt;/a&gt;，需要注意的是为了使用 Sanitizer 我们需要将 &lt;code&gt;compiler-rt&lt;/code&gt; 加入到 LLVM_ENABLE_PROJECTS 这个 CMake varibale 里。&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-shell&#34; data-lang=&#34;shell&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;$ git clone -b llvmorg-14.0.4 https://github.com/llvm/llvm-project.git --depth &lt;span style=&#34;color:#ae81ff&#34;&gt;1&lt;/span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;$ cd llvm-project
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;$ cmake -DCMAKE_INSTALL_PREFIX&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;&lt;span style=&#34;color:#e6db74&#34;&gt;${&lt;/span&gt;HOME&lt;span style=&#34;color:#e6db74&#34;&gt;}&lt;/span&gt;/llvm-bin -DCMAKE_BUILD_TYPE&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;Release -DLLVM_ENABLE_PROJECTS&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;clang;compiler-rt&amp;#34;&lt;/span&gt; -DLLVM_TARGETS_TO_BUILD&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;X86&amp;#34;&lt;/span&gt; -DLLVM_ENABLE_DUMP&lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt;ON ../llvm-project/llvm
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;$ make -j12
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;$ make install
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;h3 id=&#34;implementing-the-instrumentation-pass&#34;&gt;Implementing the instrumentation pass&lt;/h3&gt;
-&lt;p&gt;我们在本文最开始提到：所有的 Sanitizer 都由编译时插桩和运行时库两部分组成，并且几乎所有的 Sanitizer 的插桩部分都是通过 LLVM pass 的方式实现的。我们的 DumbSanitizer 也不例外。（关于 LLVM pass 的编写，见 &lt;a href=&#34;https://llvm.org/docs/WritingAnLLVMPass.html&#34;&gt;Writing an LLVM Pass&lt;/a&gt;）&lt;/p&gt;
-&lt;p&gt;本节就来说明 DumbSanitizer 的插桩部分是如何实现的。&lt;/p&gt;
-&lt;p&gt;这里只对一些关键点进行说明，完整实现见 &lt;a href=&#34;https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16&#34;&gt;DumbSanitizer.patch · GitHub&lt;/a&gt; 中：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;llvm-project/llvm/include/llvm/Transforms/Instrumentation/DumbSanitizer.h&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;llvm-project/llvm/lib/Transforms/Instrumentation/DumbSanitizer.cpp。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;首先说一下，我们实现 “对于程序中的每一个变量，统计该变量在程序运行中被访问了多少次，并且在程序退出时打印出访问次数最多的变量” 该功能的思路：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;编译时插桩：对于每一次 memory access (load, store)，我们都会在此次 acccess 之前插入一个函数调用 (__dbsan_read, __dbsan_write)，该函数调用是在运行时库中实现的。&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;运行时库：维护一个全局 map，该 map 记录了每一个 address 被访问的次数。函数 __dbsan_read, __db_write 的实现就是去更新该 map 中 key 为本次访问变量的 address 所对应的 value 的值。&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;即，程序使用 DumbSanitizer 编译后，每一次对变量 x 的读/写之前都会先调用 __dbsan_read/__dbsan_write，把变量 x 的地址传过去，__dbsan_read/__dbsan_write 会将 access_count_map[&amp;amp;x]++。在程序退出时根据 access_count_map 的内容就能给出访问次数最多的变量/地址了。&lt;/p&gt;
-&lt;p&gt;那么如何实现在每一次 memory access (load, store) 之前都插入一个函数调用 (__dbsan_read, __dbsan_write) 呢？核心代码其实非常简单：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;SmallVector&lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;&lt;/span&gt;Instruction &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;, &lt;span style=&#34;color:#ae81ff&#34;&gt;16&lt;/span&gt;&lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;&lt;/span&gt; LoadsAndStores;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;for&lt;/span&gt; (&lt;span style=&#34;color:#66d9ef&#34;&gt;auto&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt;BB : F) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;for&lt;/span&gt; (&lt;span style=&#34;color:#66d9ef&#34;&gt;auto&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt;Inst : BB) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    &lt;span style=&#34;color:#66d9ef&#34;&gt;if&lt;/span&gt; (isa&lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;&lt;/span&gt;LoadInst&lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;&lt;/span&gt;(Inst) &lt;span style=&#34;color:#f92672&#34;&gt;||&lt;/span&gt; isa&lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;&lt;/span&gt;StoreInst&lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;&lt;/span&gt;(Inst))
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;      LoadsAndStores.push_back(&lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt;Inst);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;for&lt;/span&gt; (&lt;span style=&#34;color:#66d9ef&#34;&gt;auto&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;Inst : LoadsAndStores) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  IRBuilder&lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;&amp;gt;&lt;/span&gt; IRB(Inst);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;bool&lt;/span&gt; IsWrite;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  Value &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;Addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;nullptr&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;if&lt;/span&gt; (LoadInst &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;LI &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; dyn_cast&lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;&lt;/span&gt;LoadInst&lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;&lt;/span&gt;(I)) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    IsWrite &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; false;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    Addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; LI&lt;span style=&#34;color:#f92672&#34;&gt;-&amp;gt;&lt;/span&gt;getPointerOperand();
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  } &lt;span style=&#34;color:#66d9ef&#34;&gt;else&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;if&lt;/span&gt; (StoreInst &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;SI &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; dyn_cast&lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;&lt;/span&gt;StoreInst&lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;&lt;/span&gt;(I)) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    IsWrite &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; true;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    Addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; SI&lt;span style=&#34;color:#f92672&#34;&gt;-&amp;gt;&lt;/span&gt;getPointerOperand();
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;if&lt;/span&gt; (IsWrite) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    IRB.CreateCall(DbsanWriteFunc, IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()));
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  } &lt;span style=&#34;color:#66d9ef&#34;&gt;else&lt;/span&gt; {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    IRB.CreateCall(DbsanReadFunc, IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()));
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;简单解释一下。其实就是遍历 Function F 中的所有指令，收集其中的 LoadInst 和 StoreInst。然后对于每一个保存起来的 LoadInst 或 StoreInst，通过 IRBuilder 在其之前都插入一条 CallInst，被调函数就是 __dbsan_read 或 __dbsan_write。函数 __dbsan_read 或 __dbsan_write 只有一个参数，该参数就是 LoadInst 或 StoreInst 的 PointerOperand，即读写的 address。&lt;/p&gt;
-&lt;h3 id=&#34;implementing-the-runtime-library&#34;&gt;Implementing the runtime library&lt;/h3&gt;
-&lt;p&gt;介绍完编译时插桩的关键点后，再来介绍下运行时库的核心实现。&lt;/p&gt;
-&lt;p&gt;DumbSanitizer 运行时库部分的核心实现见 &lt;a href=&#34;https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16&#34;&gt;DumbSanitizer.patch · GitHub&lt;/a&gt; 中的：&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;llvm-project/compiler-rt/lib/dbsan/dbsan_interface.h&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;llvm-project/compiler-rt/lib/dbsan/dbsan_interface.cpp&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;llvm-project/compiler-rt/lib/dbsan/dbsan_rtl.h&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;llvm-project/compiler-rt/lib/dbsan/dbsan_rtl.cpp&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;dbsan_interface.h 和 dbsan_interface.cpp 中是对暴露给外部的函数 __dbsan_read 和 __dbsan_write 的实现：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;__dbsan_read&lt;/span&gt;(&lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;addr) { MemoryAccess((uptr)addr, kAccessRead); }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;__dbsan_write&lt;/span&gt;(&lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;addr) { MemoryAccess((uptr)addr, kAccessWrite); }
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;可以看到 __dbsan_read 和 __dbsan_write 的实现就是对函数 MemoryAccess 的包装，MemoryAccess 的实现位于 dbsan_rtl.h 和 dbsan_rtl.cpp。&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;MemoryAccess&lt;/span&gt;(uptr addr, AccessType typ) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  ctx&lt;span style=&#34;color:#f92672&#34;&gt;-&amp;gt;&lt;/span&gt;access_count_map[addr]&lt;span style=&#34;color:#f92672&#34;&gt;++&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  uptr access_count &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; ctx&lt;span style=&#34;color:#f92672&#34;&gt;-&amp;gt;&lt;/span&gt;access_count_map[addr];
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;if&lt;/span&gt; (access_count &lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;&lt;/span&gt; ctx&lt;span style=&#34;color:#f92672&#34;&gt;-&amp;gt;&lt;/span&gt;most_frequently_accessed_count) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    ctx&lt;span style=&#34;color:#f92672&#34;&gt;-&amp;gt;&lt;/span&gt;most_frequently_accessed_count &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; access_count;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    ctx&lt;span style=&#34;color:#f92672&#34;&gt;-&amp;gt;&lt;/span&gt;most_frequently_accessed_addr &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; addr;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;MemoryAccess 的实现也很简单，就是更新 access_count_map 中 key 为 addr 的 value 值，然后更新访问次数最多的 address。&lt;/p&gt;
-&lt;p&gt;这里 ctx 是运行时库中维护的一个 Context 类型的全局变量：&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;struct&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;Context&lt;/span&gt; {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;bool&lt;/span&gt; initialized;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  uptr most_frequently_accessed_addr;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  uptr most_frequently_accessed_count;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  __sanitizer&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;DenseMap&lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;&lt;/span&gt;uptr, uptr&lt;span style=&#34;color:#f92672&#34;&gt;&amp;gt;&lt;/span&gt; access_count_map;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;};
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;most_frequently_accessed_addr 用于记录访问次数最多的地址&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;most_frequently_accessed_count 用于记录最多的访问次数是多少&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;access_count_map 则是记录了每一个地址被访问了多少次&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;最后讲一下我们是如何做到程序退出时打印访问次数最多的变量的。其实也很简单，就是通过 atexit 来注册程序退出时执行的函数，在该函数中直接打印我们在 Context 中保存的 most_frequently_accessed_addr 和 most_frequently_accessed_count 即可。&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;static&lt;/span&gt; &lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;dbsan_atexit&lt;/span&gt;() {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  __sanitizer&lt;span style=&#34;color:#f92672&#34;&gt;::&lt;/span&gt;Printf(
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;      &lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;#Most frequently accessed address: %p, access count: %zd&lt;/span&gt;&lt;span style=&#34;color:#ae81ff&#34;&gt;\n&lt;/span&gt;&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;&lt;/span&gt;,
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;      (&lt;span style=&#34;color:#66d9ef&#34;&gt;void&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;*&lt;/span&gt;)ctx&lt;span style=&#34;color:#f92672&#34;&gt;-&amp;gt;&lt;/span&gt;most_frequently_accessed_addr,
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;      ctx&lt;span style=&#34;color:#f92672&#34;&gt;-&amp;gt;&lt;/span&gt;most_frequently_accessed_count);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;h3 id=&#34;integrating-the-sanitizer&#34;&gt;Integrating the sanitizer&lt;/h3&gt;
-&lt;p&gt;实现完 DumbSanitizer 的编译时插桩和运行时库这两个核心部分，剩下的就是将我们的 DumbSanitizer 集成在 clang/llvm 的编译流程中，使得能够通过编译选项 -fsanitize=dumb 来启用 DumbSanitizer。&lt;/p&gt;
-&lt;p&gt;这部分修改的文件多且杂，没有什么需要特别说明的地方。这里只给出所需要修改的文件，详见 &lt;a href=&#34;https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16&#34;&gt;DumbSanitizer.patch · GitHub&lt;/a&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;llvm-project/clang/include/clang/Basic/Sanitizers.def，添加 DumbSanitizer 的定义&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;llvm-project/clang/include/clang/Driver/SanitizerArgs.h，添加是否启用的 DumbSanitizer 的判断&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;修改 llvm-project/clang/lib/CodeGen/BackendUtil.cpp，将 DumbSanitizer 的插桩 pass 添加至 pass manager&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;修改 llvm-project/clang/lib/Driver/ToolChains/CommonArgs.cpp，如果启用了 DumbSanitizer，则链接 DumbSanitizer 的运行时库&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;修改 llvm-project/clang/lib/Driver/ToolChains/Linux.cpp，定义 DumbSanitizer 所支持的架构，简单起见我们 DumbSanitizer 只支持 X86_64&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h3 id=&#34;running-the-dumb-sanitizer&#34;&gt;Running the dumb sanitizer&lt;/h3&gt;
-&lt;p&gt;本节我们用一个例子来跑下 DumbSanitizer ，看看效果。&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre tabindex=&#34;0&#34; style=&#34;color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;&#34;&gt;&lt;code class=&#34;language-cpp&#34; data-lang=&#34;cpp&#34;&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// clang++ -fsanitize=dumb test.cpp -o test
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;// DBSAN_OPTIONS=&amp;#39;print_frequent_access=1&amp;#39; ./test
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;#include&lt;/span&gt; &lt;span style=&#34;color:#75715e&#34;&gt;&amp;lt;stdio.h&amp;gt;&lt;/span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;
-&lt;/span&gt;&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;&lt;span style=&#34;color:#75715e&#34;&gt;&lt;/span&gt;&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; &lt;span style=&#34;color:#a6e22e&#34;&gt;main&lt;/span&gt;(&lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; argc, &lt;span style=&#34;color:#66d9ef&#34;&gt;char&lt;/span&gt; &lt;span style=&#34;color:#f92672&#34;&gt;**&lt;/span&gt;argv) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; r &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#ae81ff&#34;&gt;0&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;int&lt;/span&gt; i &lt;span style=&#34;color:#f92672&#34;&gt;=&lt;/span&gt; &lt;span style=&#34;color:#ae81ff&#34;&gt;1&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  printf(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;address of `r` is %p&lt;/span&gt;&lt;span style=&#34;color:#ae81ff&#34;&gt;\n&lt;/span&gt;&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;&lt;/span&gt;, &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt;r);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  printf(&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;address of `i` is %p&lt;/span&gt;&lt;span style=&#34;color:#ae81ff&#34;&gt;\n&lt;/span&gt;&lt;span style=&#34;color:#e6db74&#34;&gt;&amp;#34;&lt;/span&gt;, &lt;span style=&#34;color:#f92672&#34;&gt;&amp;amp;&lt;/span&gt;i);
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;for&lt;/span&gt; (; i &lt;span style=&#34;color:#f92672&#34;&gt;&amp;lt;&lt;/span&gt; &lt;span style=&#34;color:#ae81ff&#34;&gt;2&lt;/span&gt;; &lt;span style=&#34;color:#f92672&#34;&gt;++&lt;/span&gt;i) {
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;    r&lt;span style=&#34;color:#f92672&#34;&gt;++&lt;/span&gt;;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  }
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;  &lt;span style=&#34;color:#66d9ef&#34;&gt;return&lt;/span&gt; i &lt;span style=&#34;color:#f92672&#34;&gt;+&lt;/span&gt; r;
-&lt;/span&gt;&lt;/span&gt;&lt;span style=&#34;display:flex;&#34;&gt;&lt;span&gt;}
-&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;这里我们在优化等级为 O0 的情况下，开启 DumbSanitizer（注：DumbSanitizer 是在所有的优化 pass 执行后，才执行插桩 pass，即 DumbSanitizer 插桩的是已经优化后的代码，可以尝试改变优化等级查看上述例子程序的输出）。&lt;/p&gt;
-&lt;p&gt;在执行编译后的二进制时，我们设置了环境变量 DBSAN_OPTIONS，通过 DBSAN_OPTIONS 中的参数 print_frequent_access 为 1 还是 0 来控制在程序退出时是否打印访问次数最多的变量地址是什么。&lt;/p&gt;
-&lt;p&gt;上述例子的运行结果如下所示：&lt;/p&gt;
-&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;address of `r` is 0x7fff5817396c
+&lt;/code>&lt;/pre>&lt;h2 id="quick-start--writing-dumb-sanitizer">Quick Start — Writing dumb sanitizer&lt;/h2>
+&lt;p>接下来这一节我们就来讲解下怎么实现一个简单的 Sanitizer（本文称之为 DumbSanitizer 或 DbSan）。我们的 DumbSanitizer 实现下述功能：对于程序中的每一个变量，我们都统计该变量在程序运行中被访问了多少次，并且在程序退出时打印出访问次数最多的变量。&lt;/p>
+&lt;h3 id="compile-llvm-project-with-compiler-rt">Compile llvm project with compiler-rt&lt;/h3>
+&lt;p>如何编译 llvm 可以参考 &lt;a href="https://llvm.org/docs/CMake.html#quick-start">Building LLVM with CMake&lt;/a>，需要注意的是为了使用 Sanitizer 我们需要将 &lt;code>compiler-rt&lt;/code> 加入到 LLVM_ENABLE_PROJECTS 这个 CMake varibale 里。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-shell" data-lang="shell">&lt;span style="display:flex;">&lt;span>$ git clone -b llvmorg-14.0.4 https://github.com/llvm/llvm-project.git --depth &lt;span style="color:#ae81ff">1&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>$ cd llvm-project
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>$ cmake -DCMAKE_INSTALL_PREFIX&lt;span style="color:#f92672">=&lt;/span>&lt;span style="color:#e6db74">${&lt;/span>HOME&lt;span style="color:#e6db74">}&lt;/span>/llvm-bin -DCMAKE_BUILD_TYPE&lt;span style="color:#f92672">=&lt;/span>Release -DLLVM_ENABLE_PROJECTS&lt;span style="color:#f92672">=&lt;/span>&lt;span style="color:#e6db74">&amp;#34;clang;compiler-rt&amp;#34;&lt;/span> -DLLVM_TARGETS_TO_BUILD&lt;span style="color:#f92672">=&lt;/span>&lt;span style="color:#e6db74">&amp;#34;X86&amp;#34;&lt;/span> -DLLVM_ENABLE_DUMP&lt;span style="color:#f92672">=&lt;/span>ON ../llvm-project/llvm
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>$ make -j12
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>$ make install
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h3 id="implementing-the-instrumentation-pass">Implementing the instrumentation pass&lt;/h3>
+&lt;p>我们在本文最开始提到：所有的 Sanitizer 都由编译时插桩和运行时库两部分组成，并且几乎所有的 Sanitizer 的插桩部分都是通过 LLVM pass 的方式实现的。我们的 DumbSanitizer 也不例外。（关于 LLVM pass 的编写，见 &lt;a href="https://llvm.org/docs/WritingAnLLVMPass.html">Writing an LLVM Pass&lt;/a>）&lt;/p>
+&lt;p>本节就来说明 DumbSanitizer 的插桩部分是如何实现的。&lt;/p>
+&lt;p>这里只对一些关键点进行说明，完整实现见 &lt;a href="https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16">DumbSanitizer.patch · GitHub&lt;/a> 中：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>llvm-project/llvm/include/llvm/Transforms/Instrumentation/DumbSanitizer.h&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>llvm-project/llvm/lib/Transforms/Instrumentation/DumbSanitizer.cpp。&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>首先说一下，我们实现 “对于程序中的每一个变量，统计该变量在程序运行中被访问了多少次，并且在程序退出时打印出访问次数最多的变量” 该功能的思路：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>编译时插桩：对于每一次 memory access (load, store)，我们都会在此次 acccess 之前插入一个函数调用 (__dbsan_read, __dbsan_write)，该函数调用是在运行时库中实现的。&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>运行时库：维护一个全局 map，该 map 记录了每一个 address 被访问的次数。函数 __dbsan_read, __db_write 的实现就是去更新该 map 中 key 为本次访问变量的 address 所对应的 value 的值。&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>即，程序使用 DumbSanitizer 编译后，每一次对变量 x 的读/写之前都会先调用 __dbsan_read/__dbsan_write，把变量 x 的地址传过去，__dbsan_read/__dbsan_write 会将 access_count_map[&amp;amp;x]++。在程序退出时根据 access_count_map 的内容就能给出访问次数最多的变量/地址了。&lt;/p>
+&lt;p>那么如何实现在每一次 memory access (load, store) 之前都插入一个函数调用 (__dbsan_read, __dbsan_write) 呢？核心代码其实非常简单：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>SmallVector&lt;span style="color:#f92672">&amp;lt;&lt;/span>Instruction &lt;span style="color:#f92672">*&lt;/span>, &lt;span style="color:#ae81ff">16&lt;/span>&lt;span style="color:#f92672">&amp;gt;&lt;/span> LoadsAndStores;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">for&lt;/span> (&lt;span style="color:#66d9ef">auto&lt;/span> &lt;span style="color:#f92672">&amp;amp;&lt;/span>BB : F) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">for&lt;/span> (&lt;span style="color:#66d9ef">auto&lt;/span> &lt;span style="color:#f92672">&amp;amp;&lt;/span>Inst : BB) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> (isa&lt;span style="color:#f92672">&amp;lt;&lt;/span>LoadInst&lt;span style="color:#f92672">&amp;gt;&lt;/span>(Inst) &lt;span style="color:#f92672">||&lt;/span> isa&lt;span style="color:#f92672">&amp;lt;&lt;/span>StoreInst&lt;span style="color:#f92672">&amp;gt;&lt;/span>(Inst))
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> LoadsAndStores.push_back(&lt;span style="color:#f92672">&amp;amp;&lt;/span>Inst);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">for&lt;/span> (&lt;span style="color:#66d9ef">auto&lt;/span> &lt;span style="color:#f92672">*&lt;/span>Inst : LoadsAndStores) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> IRBuilder&lt;span style="color:#f92672">&amp;lt;&amp;gt;&lt;/span> IRB(Inst);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">bool&lt;/span> IsWrite;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> Value &lt;span style="color:#f92672">*&lt;/span>Addr &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#66d9ef">nullptr&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> (LoadInst &lt;span style="color:#f92672">*&lt;/span>LI &lt;span style="color:#f92672">=&lt;/span> dyn_cast&lt;span style="color:#f92672">&amp;lt;&lt;/span>LoadInst&lt;span style="color:#f92672">&amp;gt;&lt;/span>(I)) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> IsWrite &lt;span style="color:#f92672">=&lt;/span> false;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> Addr &lt;span style="color:#f92672">=&lt;/span> LI&lt;span style="color:#f92672">-&amp;gt;&lt;/span>getPointerOperand();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> } &lt;span style="color:#66d9ef">else&lt;/span> &lt;span style="color:#a6e22e">if&lt;/span> (StoreInst &lt;span style="color:#f92672">*&lt;/span>SI &lt;span style="color:#f92672">=&lt;/span> dyn_cast&lt;span style="color:#f92672">&amp;lt;&lt;/span>StoreInst&lt;span style="color:#f92672">&amp;gt;&lt;/span>(I)) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> IsWrite &lt;span style="color:#f92672">=&lt;/span> true;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> Addr &lt;span style="color:#f92672">=&lt;/span> SI&lt;span style="color:#f92672">-&amp;gt;&lt;/span>getPointerOperand();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> (IsWrite) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> IRB.CreateCall(DbsanWriteFunc, IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> } &lt;span style="color:#66d9ef">else&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> IRB.CreateCall(DbsanReadFunc, IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>简单解释一下。其实就是遍历 Function F 中的所有指令，收集其中的 LoadInst 和 StoreInst。然后对于每一个保存起来的 LoadInst 或 StoreInst，通过 IRBuilder 在其之前都插入一条 CallInst，被调函数就是 __dbsan_read 或 __dbsan_write。函数 __dbsan_read 或 __dbsan_write 只有一个参数，该参数就是 LoadInst 或 StoreInst 的 PointerOperand，即读写的 address。&lt;/p>
+&lt;h3 id="implementing-the-runtime-library">Implementing the runtime library&lt;/h3>
+&lt;p>介绍完编译时插桩的关键点后，再来介绍下运行时库的核心实现。&lt;/p>
+&lt;p>DumbSanitizer 运行时库部分的核心实现见 &lt;a href="https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16">DumbSanitizer.patch · GitHub&lt;/a> 中的：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>llvm-project/compiler-rt/lib/dbsan/dbsan_interface.h&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>llvm-project/compiler-rt/lib/dbsan/dbsan_interface.cpp&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>llvm-project/compiler-rt/lib/dbsan/dbsan_rtl.h&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>llvm-project/compiler-rt/lib/dbsan/dbsan_rtl.cpp&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>dbsan_interface.h 和 dbsan_interface.cpp 中是对暴露给外部的函数 __dbsan_read 和 __dbsan_write 的实现：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#a6e22e">__dbsan_read&lt;/span>(&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#f92672">*&lt;/span>addr) { MemoryAccess((uptr)addr, kAccessRead); }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#a6e22e">__dbsan_write&lt;/span>(&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#f92672">*&lt;/span>addr) { MemoryAccess((uptr)addr, kAccessWrite); }
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>可以看到 __dbsan_read 和 __dbsan_write 的实现就是对函数 MemoryAccess 的包装，MemoryAccess 的实现位于 dbsan_rtl.h 和 dbsan_rtl.cpp。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#a6e22e">MemoryAccess&lt;/span>(uptr addr, AccessType typ) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> ctx&lt;span style="color:#f92672">-&amp;gt;&lt;/span>access_count_map[addr]&lt;span style="color:#f92672">++&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> uptr access_count &lt;span style="color:#f92672">=&lt;/span> ctx&lt;span style="color:#f92672">-&amp;gt;&lt;/span>access_count_map[addr];
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> (access_count &lt;span style="color:#f92672">&amp;gt;&lt;/span> ctx&lt;span style="color:#f92672">-&amp;gt;&lt;/span>most_frequently_accessed_count) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> ctx&lt;span style="color:#f92672">-&amp;gt;&lt;/span>most_frequently_accessed_count &lt;span style="color:#f92672">=&lt;/span> access_count;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> ctx&lt;span style="color:#f92672">-&amp;gt;&lt;/span>most_frequently_accessed_addr &lt;span style="color:#f92672">=&lt;/span> addr;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>MemoryAccess 的实现也很简单，就是更新 access_count_map 中 key 为 addr 的 value 值，然后更新访问次数最多的 address。&lt;/p>
+&lt;p>这里 ctx 是运行时库中维护的一个 Context 类型的全局变量：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">struct&lt;/span> &lt;span style="color:#a6e22e">Context&lt;/span> {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">bool&lt;/span> initialized;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> uptr most_frequently_accessed_addr;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> uptr most_frequently_accessed_count;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> __sanitizer&lt;span style="color:#f92672">::&lt;/span>DenseMap&lt;span style="color:#f92672">&amp;lt;&lt;/span>uptr, uptr&lt;span style="color:#f92672">&amp;gt;&lt;/span> access_count_map;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>};
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;ul>
+&lt;li>
+&lt;p>most_frequently_accessed_addr 用于记录访问次数最多的地址&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>most_frequently_accessed_count 用于记录最多的访问次数是多少&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>access_count_map 则是记录了每一个地址被访问了多少次&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>最后讲一下我们是如何做到程序退出时打印访问次数最多的变量的。其实也很简单，就是通过 atexit 来注册程序退出时执行的函数，在该函数中直接打印我们在 Context 中保存的 most_frequently_accessed_addr 和 most_frequently_accessed_count 即可。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">static&lt;/span> &lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#a6e22e">dbsan_atexit&lt;/span>() {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> __sanitizer&lt;span style="color:#f92672">::&lt;/span>Printf(
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#e6db74">&amp;#34;#Most frequently accessed address: %p, access count: %zd&lt;/span>&lt;span style="color:#ae81ff">\n&lt;/span>&lt;span style="color:#e6db74">&amp;#34;&lt;/span>,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> (&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#f92672">*&lt;/span>)ctx&lt;span style="color:#f92672">-&amp;gt;&lt;/span>most_frequently_accessed_addr,
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> ctx&lt;span style="color:#f92672">-&amp;gt;&lt;/span>most_frequently_accessed_count);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h3 id="integrating-the-sanitizer">Integrating the sanitizer&lt;/h3>
+&lt;p>实现完 DumbSanitizer 的编译时插桩和运行时库这两个核心部分，剩下的就是将我们的 DumbSanitizer 集成在 clang/llvm 的编译流程中，使得能够通过编译选项 -fsanitize=dumb 来启用 DumbSanitizer。&lt;/p>
+&lt;p>这部分修改的文件多且杂，没有什么需要特别说明的地方。这里只给出所需要修改的文件，详见 &lt;a href="https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16">DumbSanitizer.patch · GitHub&lt;/a>&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>llvm-project/clang/include/clang/Basic/Sanitizers.def，添加 DumbSanitizer 的定义&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>llvm-project/clang/include/clang/Driver/SanitizerArgs.h，添加是否启用的 DumbSanitizer 的判断&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>修改 llvm-project/clang/lib/CodeGen/BackendUtil.cpp，将 DumbSanitizer 的插桩 pass 添加至 pass manager&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>修改 llvm-project/clang/lib/Driver/ToolChains/CommonArgs.cpp，如果启用了 DumbSanitizer，则链接 DumbSanitizer 的运行时库&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>修改 llvm-project/clang/lib/Driver/ToolChains/Linux.cpp，定义 DumbSanitizer 所支持的架构，简单起见我们 DumbSanitizer 只支持 X86_64&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;h3 id="running-the-dumb-sanitizer">Running the dumb sanitizer&lt;/h3>
+&lt;p>本节我们用一个例子来跑下 DumbSanitizer ，看看效果。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// clang++ -fsanitize=dumb test.cpp -o test
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">// DBSAN_OPTIONS=&amp;#39;print_frequent_access=1&amp;#39; ./test
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">#include&lt;/span> &lt;span style="color:#75715e">&amp;lt;stdio.h&amp;gt;&lt;/span>&lt;span style="color:#75715e">
+&lt;/span>&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#75715e">&lt;/span>&lt;span style="color:#66d9ef">int&lt;/span> &lt;span style="color:#a6e22e">main&lt;/span>(&lt;span style="color:#66d9ef">int&lt;/span> argc, &lt;span style="color:#66d9ef">char&lt;/span> &lt;span style="color:#f92672">**&lt;/span>argv) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">int&lt;/span> r &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#ae81ff">0&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">int&lt;/span> i &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#ae81ff">1&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> printf(&lt;span style="color:#e6db74">&amp;#34;address of `r` is %p&lt;/span>&lt;span style="color:#ae81ff">\n&lt;/span>&lt;span style="color:#e6db74">&amp;#34;&lt;/span>, &lt;span style="color:#f92672">&amp;amp;&lt;/span>r);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> printf(&lt;span style="color:#e6db74">&amp;#34;address of `i` is %p&lt;/span>&lt;span style="color:#ae81ff">\n&lt;/span>&lt;span style="color:#e6db74">&amp;#34;&lt;/span>, &lt;span style="color:#f92672">&amp;amp;&lt;/span>i);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">for&lt;/span> (; i &lt;span style="color:#f92672">&amp;lt;&lt;/span> &lt;span style="color:#ae81ff">2&lt;/span>; &lt;span style="color:#f92672">++&lt;/span>i) {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> r&lt;span style="color:#f92672">++&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> }
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> i &lt;span style="color:#f92672">+&lt;/span> r;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>这里我们在优化等级为 O0 的情况下，开启 DumbSanitizer（注：DumbSanitizer 是在所有的优化 pass 执行后，才执行插桩 pass，即 DumbSanitizer 插桩的是已经优化后的代码，可以尝试改变优化等级查看上述例子程序的输出）。&lt;/p>
+&lt;p>在执行编译后的二进制时，我们设置了环境变量 DBSAN_OPTIONS，通过 DBSAN_OPTIONS 中的参数 print_frequent_access 为 1 还是 0 来控制在程序退出时是否打印访问次数最多的变量地址是什么。&lt;/p>
+&lt;p>上述例子的运行结果如下所示：&lt;/p>
+&lt;pre tabindex="0">&lt;code>address of `r` is 0x7fff5817396c
 address of `i` is 0x7fff58173968
 #Most frequently accessed address: 0x7fff58173968, access count: 6
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;可以看出被访问次数最多的变量是 i，被访问了的 6 次。&lt;/p&gt;
-&lt;p&gt;感兴趣可以通过 LLVM IR 来分析这是为什么，这里就不再赘述了。&lt;/p&gt;
-&lt;pre tabindex=&#34;0&#34;&gt;&lt;code&gt;define dso_local noundef i32 @main(i32 noundef %0, i8** noundef %1) #0 {
-  %3 = alloca i32, align 4
-  %4 = alloca i32, align 4
-  %5 = alloca i8**, align 8
-  %6 = alloca i32, align 4 ; address of r
-  %7 = alloca i32, align 4 ; address of i
-  %8 = bitcast i32* %3 to i8*
-  call void @__dbsan_write4(i8* %8)
-  store i32 0, i32* %3, align 4
-  %9 = bitcast i32* %4 to i8*
-  call void @__dbsan_write4(i8* %9)
-  store i32 %0, i32* %4, align 4
-  %10 = bitcast i8*** %5 to i8*
-  call void @__dbsan_write8(i8* %10)
-  store i8** %1, i8*** %5, align 8
-  %11 = bitcast i32* %6 to i8*
-  call void @__dbsan_write4(i8* %11) ; r = 0
-  store i32 0, i32* %6, align 4
-  %12 = bitcast i32* %7 to i8*
-  call void @__dbsan_write4(i8* %12) ; i = 1
-  store i32 1, i32* %7, align 4
-  %13 = call i32 (i8*, ...) @printf(i8* noundef getelementptr inbounds ([22 x i8], [22 x i8]* @.str, i64 0, i64 0), i32* noundef %6)
-  %14 = call i32 (i8*, ...) @printf(i8* noundef getelementptr inbounds ([22 x i8], [22 x i8]* @.str.1, i64 0, i64 0), i32* noundef %7)
-  br label %15
-
-15:                                               ; preds = %24, %2
-  %16 = bitcast i32* %7 to i8*
-  call void @__dbsan_read4(i8* %16); i &amp;lt; 2
-  %17 = load i32, i32* %7, align 4
-  %18 = icmp slt i32 %17, 2
-  br i1 %18, label %19, label %29
-
-19:                                               ; preds = %15
-  %20 = bitcast i32* %6 to i8*
-  call void @__dbsan_read4(i8* %20) ; r&amp;#39; = r (part1 of r++)
-  %21 = load i32, i32* %6, align 4
-  %22 = add nsw i32 %21, 1
-  %23 = bitcast i32* %6 to i8*
-  call void @__dbsan_write4(i8* %23) ; r = r&amp;#39; + 1 (part2 of r++)
-  store i32 %22, i32* %6, align 4
-  br label %24
-
-24:                                               ; preds = %19
-  %25 = bitcast i32* %7 to i8*
-  call void @__dbsan_read4(i8* %25) ; i&amp;#39; = i (part1 of ++i)
-  %26 = load i32, i32* %7, align 4
-  %27 = add nsw i32 %26, 1
-  %28 = bitcast i32* %7 to i8*
-  call void @__dbsan_write4(i8* %28) ; i = i&amp;#39; + 1 (part2 of ++i)
-  store i32 %27, i32* %7, align 4
-  br label %15, !llvm.loop !4
-
-29:                                               ; preds = %15
-  %30 = bitcast i32* %7 to i8*
-  call void @__dbsan_read4(i8* %30) ; i&amp;#39; = i (part1 of i + r)
-  %31 = load i32, i32* %7, align 4
-  %32 = bitcast i32* %6 to i8*
-  call void @__dbsan_read4(i8* %32) ; r&amp;#39; = r (part2 of i + r)
-  %33 = load i32, i32* %6, align 4
-  %34 = add nsw i32 %31, %33 ; i&amp;#39; + r&amp;#39; (part 3 of i + r)
-  ret i32 %34
+&lt;/code>&lt;/pre>&lt;p>可以看出被访问次数最多的变量是 i，被访问了的 6 次。&lt;/p>
+&lt;p>感兴趣可以通过 LLVM IR 来分析这是为什么，这里就不再赘述了。&lt;/p>
+&lt;pre tabindex="0">&lt;code>define dso_local noundef i32 @main(i32 noundef %0, i8** noundef %1) #0 {
+%3 = alloca i32, align 4
+%4 = alloca i32, align 4
+%5 = alloca i8**, align 8
+%6 = alloca i32, align 4 ; address of r
+%7 = alloca i32, align 4 ; address of i
+%8 = bitcast i32* %3 to i8*
+call void @__dbsan_write4(i8* %8)
+store i32 0, i32* %3, align 4
+%9 = bitcast i32* %4 to i8*
+call void @__dbsan_write4(i8* %9)
+store i32 %0, i32* %4, align 4
+%10 = bitcast i8*** %5 to i8*
+call void @__dbsan_write8(i8* %10)
+store i8** %1, i8*** %5, align 8
+%11 = bitcast i32* %6 to i8*
+call void @__dbsan_write4(i8* %11) ; r = 0
+store i32 0, i32* %6, align 4
+%12 = bitcast i32* %7 to i8*
+call void @__dbsan_write4(i8* %12) ; i = 1
+store i32 1, i32* %7, align 4
+%13 = call i32 (i8*, ...) @printf(i8* noundef getelementptr inbounds ([22 x i8], [22 x i8]* @.str, i64 0, i64 0), i32* noundef %6)
+%14 = call i32 (i8*, ...) @printf(i8* noundef getelementptr inbounds ([22 x i8], [22 x i8]* @.str.1, i64 0, i64 0), i32* noundef %7)
+br label %15
+15: ; preds = %24, %2
+%16 = bitcast i32* %7 to i8*
+call void @__dbsan_read4(i8* %16); i &amp;lt; 2
+%17 = load i32, i32* %7, align 4
+%18 = icmp slt i32 %17, 2
+br i1 %18, label %19, label %29
+19: ; preds = %15
+%20 = bitcast i32* %6 to i8*
+call void @__dbsan_read4(i8* %20) ; r&amp;#39; = r (part1 of r++)
+%21 = load i32, i32* %6, align 4
+%22 = add nsw i32 %21, 1
+%23 = bitcast i32* %6 to i8*
+call void @__dbsan_write4(i8* %23) ; r = r&amp;#39; + 1 (part2 of r++)
+store i32 %22, i32* %6, align 4
+br label %24
+24: ; preds = %19
+%25 = bitcast i32* %7 to i8*
+call void @__dbsan_read4(i8* %25) ; i&amp;#39; = i (part1 of ++i)
+%26 = load i32, i32* %7, align 4
+%27 = add nsw i32 %26, 1
+%28 = bitcast i32* %7 to i8*
+call void @__dbsan_write4(i8* %28) ; i = i&amp;#39; + 1 (part2 of ++i)
+store i32 %27, i32* %7, align 4
+br label %15, !llvm.loop !4
+29: ; preds = %15
+%30 = bitcast i32* %7 to i8*
+call void @__dbsan_read4(i8* %30) ; i&amp;#39; = i (part1 of i + r)
+%31 = load i32, i32* %7, align 4
+%32 = bitcast i32* %6 to i8*
+call void @__dbsan_read4(i8* %32) ; r&amp;#39; = r (part2 of i + r)
+%33 = load i32, i32* %6, align 4
+%34 = add nsw i32 %31, %33 ; i&amp;#39; + r&amp;#39; (part 3 of i + r)
+ret i32 %34
 }
-&lt;/code&gt;&lt;/pre&gt;&lt;h2 id=&#34;references&#34;&gt;References&lt;/h2&gt;
-&lt;ol&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&#34;https://github.com/google/sanitizers&#34;&gt;GitHub - google/sanitizers: AddressSanitizer, ThreadSanitizer, MemorySanitizer&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;a href=&#34;https://github.com/trailofbits/llvm-sanitizer-tutorial&#34;&gt;GitHub - trailofbits/llvm-sanitizer-tutorial: An LLVM sanitizer tutorial&lt;/a&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;</description>
-    </item>
-    
-  </channel>
-</rss>
+&lt;/code>&lt;/pre>&lt;h2 id="references">References&lt;/h2>
+&lt;ol>
+&lt;li>
+&lt;p>&lt;a href="https://github.com/google/sanitizers">GitHub - google/sanitizers: AddressSanitizer, ThreadSanitizer, MemorySanitizer&lt;/a>&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;a href="https://github.com/trailofbits/llvm-sanitizer-tutorial">GitHub - trailofbits/llvm-sanitizer-tutorial: An LLVM sanitizer tutorial&lt;/a>&lt;/p>
+&lt;/li>
+&lt;/ol></description></item></channel></rss>
