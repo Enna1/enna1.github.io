@@ -19,6 +19,7 @@ theme = "mainroad"
   post_meta = ["date", "categories"] # Order of post meta information
   # Do not show podcast content in home
   mainSections = ["post"] # mainSections = ["post", "podcast"]
+  mathjax = false # Enable MathJax
 
 [Params.logo]
   subtitle = "Nobody dies a virgin, life fucks us all!" # Logo subtitle
