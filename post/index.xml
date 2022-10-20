@@ -1,4 +1,315 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Blog section Enna1's blog</title><link>https://enna1.github.io/post/</link><description> Blog section Enna1's blog</description><generator>Hugo -- gohugo.io</generator><language>en-us</language><lastBuildDate>Tue, 18 Oct 2022 00:00:00 +0000</lastBuildDate><atom:link href="https://enna1.github.io/post/index.xml" rel="self" type="application/rss+xml"/><item><title>How Sanitizer Get Stack Trace</title><link>https://enna1.github.io/post/howsanitizergetstacktrace/</link><pubDate>Tue, 18 Oct 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/howsanitizergetstacktrace/</guid><description>&lt;p>本文以 ASan 为例分析 sanitizer runtime 是如何获取和保存 stack trace 的。&lt;/p>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Blog section Enna1's blog</title><link>https://enna1.github.io/post/</link><description> Blog section Enna1's blog</description><generator>Hugo -- gohugo.io</generator><language>en-us</language><lastBuildDate>Thu, 20 Oct 2022 00:00:00 +0000</lastBuildDate><atom:link href="https://enna1.github.io/post/index.xml" rel="self" type="application/rss+xml"/><item><title>Dissecting ThreadSanitizer Algorithm</title><link>https://enna1.github.io/post/dissecting-thread-sanitizer/</link><pubDate>Thu, 20 Oct 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/dissecting-thread-sanitizer/</guid><description>&lt;p>本文深入剖析 ThreadSanitizer(V2) 检测 Data Race 背后的算法原理。&lt;/p>
+&lt;h2 id="introduction">Introduction&lt;/h2>
+&lt;p>ThreadSanitizer(AKA TSan) 是一个集成在 GCC 和 Clang 中的动态分析工具，能够检测 C++ 代码中大多数的数据竞争 (data race) 。它由编译时插桩和运行时库两部分组成，通过编译和链接时添加参数 &lt;code>-fsanitize=thread&lt;/code>，就可以在运行时检测 data race 。&lt;/p>
+&lt;h2 id="data-race">Data Race&lt;/h2>
+&lt;p>TSan 是检测 data race 的动态分析工具。我们先看下 data race 指的是什么？&lt;/p>
+&lt;p>&lt;strong>Data Race&lt;/strong>：两个线程 &lt;strong>concurrently&lt;/strong> 访问了&lt;strong>同一个内存位置 (memory location)&lt;/strong>，并且两个线程的访存操作中&lt;strong>至少一个是写操作&lt;/strong>。&lt;/p>
+&lt;p>注：关于 race condition 和 data race 的区别，见 &lt;a href="https://blog.regehr.org/archives/490">Race Condition vs. Data Race – Embedded in Academia&lt;/a>&lt;/p>
+&lt;p>例如下述代码：两个线程并发地修改整型全局变量 Global 存在 data race。两个线程执行结束后，全局变量 Global 的值可能是 1 也可能是 2。如果是在读写 STL 容器时存在 data race，则可能导致更严重的后果，比如内存破坏、程序崩溃。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> Global;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#a6e22e">Thread1&lt;/span>() {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> Global &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#ae81ff">1&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#a6e22e">Thread2&lt;/span>() {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> Global &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#ae81ff">2&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>根据 data race 的定义，判断代码中是否存在 data race 需要考虑 3 个条件：&lt;/p>
+&lt;ol>
+&lt;li>两个线程访问的是否为&lt;strong>同一个 memory location&lt;/strong>&lt;/li>
+&lt;li>两个线程的访存操作中&lt;strong>至少有一个是写操作&lt;/strong>&lt;/li>
+&lt;li>两个线程的访存操作是否 &lt;strong>concurrent&lt;/strong>&lt;/li>
+&lt;/ol>
+&lt;p>其中前两个条件很容易判断，所以检测 data race 的要解决的关键问题就是怎么判断两个访存操作是否 &lt;strong>concurrent&lt;/strong> &lt;strong>！&lt;/strong>&lt;/p>
+&lt;h2 id="happen-before--concurrent">Happen-Before &amp;amp; Concurrent&lt;/h2>
+&lt;p>在介绍如何判断两次访问操作是否是 concurrent 之前，我们需要先引入 happen-before 的定义。&lt;/p>
+&lt;p>Happen-before 的定义最开始是在 &lt;a href="https://lamport.azurewebsites.net/pubs/time-clocks.pdf">Lamport, L., 1978. Time, clocks, and the ordering of events in a distributed system&lt;/a> 中给出的，描述的是分布式系统中事件之间的一种偏序关系。&lt;/p>
+&lt;p>一个分布式系统是由一系列 processes 组成的，每个 process 又由一系列事件组成， 不同的 process 之间是通过收发消息进行通信的。&lt;/p>
+&lt;p>&lt;em>&lt;strong>Happen-before&lt;/strong>&lt;/em> 关系（记作 $\rightarrow$）的定义：&lt;/p>
+&lt;ol>
+&lt;li>
+&lt;p>如果事件 $a$ 和事件 $b$ 是在同一个 process 中的事件，并且 $a$ 早于 $b$ 发生，那么 $a \rightarrow b$&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>如果事件 $a$ 和事件 $b$ 是不同 process 中的事件，且 $b$ 是 $a$ 发送的消息的接收者，那么 $a \rightarrow b$&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>&lt;em>&lt;strong>Happen-before&lt;/strong>&lt;/em> 关系是一种严格&lt;strong>偏序&lt;/strong>关系 (strict partial order)，即满足 transitive, irreflexive and antisymmetric&lt;/p>
+&lt;ol>
+&lt;li>Transitive。对于任意事件 $a,b ,c$，如果 $a \rightarrow b$ 且 $b \rightarrow c$，那么有 $a \rightarrow c$&lt;/li>
+&lt;li>Irreflexive。对于任意事件 $a$，都有 $a \nrightarrow a$&lt;/li>
+&lt;li>Antisymmetric。对于任意事件 $a,b$，如果 $a \rightarrow b$，那么有 $b \nrightarrow a$&lt;/li>
+&lt;/ol>
+&lt;/li>
+&lt;/ol>
+&lt;p>下面通过一个例子对 happen-before 进行说明：&lt;/p>
+&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-09-43-40-image.png" title="" alt="" width="450">
+&lt;p>上图是对一个分布式系统的某一次 trace：&lt;/p>
+&lt;ul>
+&lt;li>3 条垂直线分别表示 3 个 process: $P, Q, R$&lt;/li>
+&lt;li>垂直线上的点表示事件，在同一条垂直线上纵坐标小的事件发生的时间早于纵坐标大的事件发生的时间。例如事件 $p_1$ 早于事件 $p_2$ 发生&lt;/li>
+&lt;li>连接 process 之间的线表示 process 之间通过收发消息进行通信，$p_1 \rightarrow q_2$ 表示 process $P$ 于事件 $p_1$ 向 process $Q$ 发送消息， 这个消息被 process $Q$ 于事件 $q_2$ 接收到&lt;/li>
+&lt;/ul>
+&lt;p>那么对于上图分布式系统 trace：&lt;/p>
+&lt;ul>
+&lt;li>根据 &lt;em>&lt;strong>happen-before&lt;/strong>&lt;/em> 的定义能得出：$p_1 \rightarrow r_4$，这是因为 $p_1 \rightarrow q_2$, $q_2 \rightarrow q_4$, $q_4 \rightarrow r_3$, $r_3 \rightarrow r_4$，所以 $p_1 \rightarrow r_4$。即事件 $p1$ 一定是先于事件 $r4$ 发生，不管上述分布式系统事件运行多少次&lt;/li>
+&lt;li>尽管根据本次 trace 看来在时间上事件 $q_3$ 是早于事件 $p_3$ 发生的，但是 $q_3 \nrightarrow p_3$ 且 $p_3 \nrightarrow q_3$，即事件 $q_3$ 和事件 $p_3$ 之间是没有 happen-before 关系的。所以不能保证每一次运行，事件 $q_3$ 都是早于事件 $p_3$ 发生的，也有可能在某一次 trace 中事件 $p_3$ 是早于事件 $q_3$ 发生的&lt;/li>
+&lt;/ul>
+&lt;p>理解了 happen-before 的定义后，我们给出 &lt;strong>concurrent&lt;/strong> 的定义：如果 $a \nrightarrow b$ 且 $b \nrightarrow a$，那么称 $a$ 和 $b$ 是 &lt;strong>concurrent&lt;/strong> 的。&lt;/p>
+&lt;p>这样我们就能够将判断两次访存操作之间是否 concurrent 转化为了判断两次访存操作之间是否存在 happen-before 关系。&lt;/p>
+&lt;p>那么如何判断两次访存操作之间是否存在 happen-before 关系呢？答案是 Vector Clock。在介绍 Vector Clock 之前，我们需要先了解下 Lamport Logical Clock。&lt;/p>
+&lt;h2 id="lamport-logical-clock">Lamport Logical Clock&lt;/h2>
+&lt;p>Lamport logical clock 算法是由 Leslie Lamport 在 &lt;a href="https://lamport.azurewebsites.net/pubs/time-clocks.pdf">Lamport, L., 1978. Time, clocks, and the ordering of events in a distributed system&lt;/a> 中提出的一种简单的逻辑时钟算法，用于描述分布式计算机系统中事件的偏序关系。&lt;/p>
+&lt;p>算法如下：&lt;/p>
+&lt;ol>
+&lt;li>每个 Process $P_i$ 都持有一个逻辑时钟 $Clock_i$，process $P_i$ 在每次本地事件发生之前，都将 $Clock_i$ 自增 1&lt;/li>
+&lt;li>Process $P_i$ 向其他 Process 发送消息时，先执行步骤 1，然后将 $Clock_i$ 的值包含在消息中一并发送出去&lt;/li>
+&lt;li>Process $P_j$ 接收到 Process $P_i$ 发送来的消息时，获取消息中携带的 $Clock_i$ 的值，与自身的 $Clock_j$ 取最大值，然后在认为收到消息之前将 $Clock_j$ 自增 1&lt;/li>
+&lt;/ol>
+&lt;p>根据 lamport logical clock 算法流程和 happen-before 定义易得：对于任意两个事件，如果事件 $a$ &lt;em>&lt;strong>happen-before&lt;/strong>&lt;/em> 事件 $b$，那么 $Clock(a) &amp;lt; Clock(b)$。&lt;/p>
+&lt;p>下面通过例子来说明 lamport logical clock 算法流程：&lt;/p>
+&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-09-51-37-image.png" title="" alt="" width="250">
+&lt;ul>
+&lt;li>初始时，Process $P$ 和 Process $Q$ 的逻辑时钟的值都为 0&lt;/li>
+&lt;li>Process $P$ 发生本地事件 $p_1$，逻辑时钟 $Clock_p$ 的值由 0 更新为 1。Process $Q$ 发生本地事件 $q_1$，逻辑时钟 $Clock_q$ 的值由 0 更新为 1&lt;/li>
+&lt;li>Process $P$ 于事件 $p_2$ 向 Process $Q$ 发送消息，先自增逻辑时钟 $Clock_p$ 的值，由 1 更新为 2。然后将此时 $Clock_p$ 的值（即 2）包含在消息中一并发送出去&lt;/li>
+&lt;li>Process $Q$ 接收到 Process $P$ 发送来的消息，获取消息中携带的逻辑时钟的值（即 2），首先将逻辑时钟 $Clock_q$ 的值更新为消息中携带的逻辑时钟的值与此时自身逻辑时钟 $Clock_q$ 的值的最大值（即 $Clock_q$ 更新为 2 和 2 的最大值，还是 2），然后再将 $Clock_q$ 自增 1（即 $Clock_q$ 的值由 2 更新为 3 ）&lt;/li>
+&lt;li>&amp;hellip;&lt;/li>
+&lt;/ul>
+&lt;p>但是 lamport logical clock 是存在局限性的：&lt;/p>
+&lt;ul>
+&lt;li>只能保证：如果 $a \rightarrow b$，那么 $Clock(a) &amp;lt; Clock(b)$&lt;/li>
+&lt;li>但是 $Clock(a) &amp;lt; Clock(b)$ 不意味着 $a \rightarrow b$，即我们不能基于 $Clock(a) &amp;lt; Clock(b)$ 来判定事件 $a$ &lt;em>&lt;strong>happen-before&lt;/strong>&lt;/em> 事件 $b$&lt;/li>
+&lt;/ul>
+&lt;p>例如 $Clock_p(p1)= 1 &amp;lt; 2 = Clock_q(q2) $，但是实际上 $p_1$ &lt;em>&lt;strong>happen-before&lt;/strong>&lt;/em> $p_2$ 是不成立！也就是说，事件 $p_1$ 和事件 $p_2$ 之间谁都可能早于另外一个事件发生。&lt;/p>
+&lt;p>我们前面将 data race 检测问题转化为了判断两次访存操作之间是否存在 happen-before 关系的问题。但是由于 lamport logical lock 的局限性，我们不能直接将 lamport logic clock 应用于 data race 的检测。&lt;/p>
+&lt;h2 id="vector-clock">Vector Clock&lt;/h2>
+&lt;p>Colin Fidge 和 Friedemann Mattern 提出的 vector clock 解决了 lamport logic clock 的上述局限性&lt;/p>
+&lt;p>vector clock 算法如下：&lt;/p>
+&lt;ul>
+&lt;li>每一个 process $P_i$ 都对应一个 vector clock $VC_i$，$VC_i$ 是由 n 个元素组成的向量，n 是分布式系统中 process 的数量。每个 process $P_i$ 的 $VC_i$ 都被初始化为 0&lt;/li>
+&lt;li>每当 process $P_i$ 发生本地事件之前，更新 vector clock：$VC_i[i] = VC_i[i] + 1$&lt;/li>
+&lt;li>Process $P_i$ 向其他 Process 发送消息时，先更新 vector clock：$VC_i[i] = VC_i[i] + 1$，然后将 $VC_i$ 的值包含在消息中&lt;/li>
+&lt;li>process $P_j$ 接收由 process $P_i$ 发送来的 message，更新 vector clock：$VC_j[j] = VC_j[j] + 1,
+VC_j[k] = max(VC_j[k], VC_i[k])\ \textup{for all process}\ k$&lt;/li>
+&lt;/ul>
+&lt;p>下面还是通过一个例子来说明 vector clock 的算法流程：&lt;/p>
+&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-10-23-24-image.png" title="" alt="" width="450">
+&lt;ul>
+&lt;li>
+&lt;p>初始时 $VC_1 = VC_2 = VC_3= [0,0,0]$&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>Process $P$ 发生内部事件 $p_1$，更新 vector clock：$VC_1 = [0+1,0,0]=[1,0,0]$&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>Process $Q$ 发生内部事件$p_2$，更新 vector clock：$VC_2 = [0,0+1,0] = [0,1,0]$&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>Process $R$ 发生内部事件 $p_3$，更新 vector clock：$VC_3 = [0,0,0+1]=[0,0,1]$&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>process $Q$ 于事件 $q_2$ 接收由 process $P$ 于事件 $p_2$ 发送的消息，更新 vector clock：&lt;/p>
+&lt;ul>
+&lt;li>$VC_1[1] = 1 + 1 = 2, VC_1 = [2, 0, 0]$&lt;/li>
+&lt;li>$VC_2[2] = 1 + 1 = 2, VC_2 = [0,2,0]$&lt;/li>
+&lt;li>$VC_2 = max(VC_1, VC_2) = [max(2,0), max(0,2), max(0,0)]=[2,2,0]$&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;li>
+&lt;p>&amp;hellip;&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;p>Vector clock 解决了 lamport logical clock 的局限性，满足如下性质：&lt;/p>
+&lt;ul>
+&lt;li>如果事件 $a$ &lt;em>&lt;strong>happen-before&lt;/strong>&lt;/em> 事件 $b$，那么 $VC(a) &amp;lt; VC(b)$&lt;/li>
+&lt;li>如果 $VC(a) &amp;lt; VC(b)$，那么事件 $a$ &lt;em>&lt;strong>happen-before&lt;/strong>&lt;/em> 事件 $b$&lt;/li>
+&lt;/ul>
+&lt;p>即 $p_a \rightarrow q_b \quad \textup{iff} \quad VC_p(a) &amp;lt; VC_q(b)$&lt;/p>
+&lt;p>Vector clock 上的偏序关系如下：&lt;/p>
+&lt;ul>
+&lt;li>$VC_p = VC_q \quad \textup{iff} \enspace \forall k, \enspace VC_p[k] = VC_q[k]$&lt;/li>
+&lt;li>$VC_p \neq VC_q \quad \textup{iff} \enspace \exist k, \enspace VC_p[k] \neq VC_q[k]$&lt;/li>
+&lt;li>$VC_p \leq VC_q \quad \textup{iff} \enspace \forall k, \enspace VC_p[k] \leq VC_q[k]$&lt;/li>
+&lt;li>$VC_p &amp;lt; VC_q \quad \textup{iff} \enspace (VC_p \le VC_q \enspace \textup{and} \enspace VC_p \neq VC_q)$&lt;/li>
+&lt;/ul>
+&lt;p>根据 $p_a \rightarrow q_b \quad \textup{iff} \quad VC_p(a) &amp;lt; VC_q(b)$ 这个性质，我们就能使用 vector clock 来判断两次访存操作之间是否存在 happen-before 关系，即能够基于 vector clock 算法来检测多线程程序中的 data race。&lt;/p>
+&lt;h2 id="data-race-detection">Data Race Detection&lt;/h2>
+&lt;p>我们前面在介绍 lamport logic clock 和 vector clock 时都是以分布式系统中的事件之间序关系为背景进行介绍的。&lt;/p>
+&lt;p>实际上多线程程序也可以看作是一个分布式系统。我们对上述 vector clock 算法稍加修改，就可以应用于检测多线程程序中的 data race：&lt;/p>
+&lt;ul>
+&lt;li>符号定义：
+&lt;ul>
+&lt;li>$\mathbb{VC_1} \sqsubseteq \mathbb{VC_2}\quad\textbf{iff}\quad\forall t.\ \mathbb{VC_1}(t) \leq \mathbb{VC_2}(t)$&lt;/li>
+&lt;li>$\mathbb{VC_1} \sqcup \mathbb{VC_2} \quad=\quad \lambda t.\ max(\mathbb{VC_1}(t), \mathbb{VC_2}(t))$&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;li>每个线程 $t$ 都对应一个 vector clock $\mathbb{VC}_t$，初始值为 0。对于任意一个线程 $u$，$\mathbb{VC}_t(u)$ 记录的其实是与线程 $t$ 的当前操作满足 happen-before 关系的线程 $u$ 的上一次操作的 clock。如果把线程 $u$ 的上一次操作记为 $O_u$，把线程 $t$ 的当前操作记为 $O_t$，那么有 $O_u\ \text{happen-before}\ O_t$&lt;/li>
+&lt;li>每一个锁 $m$ 都对应一个 vector clock $\mathbb{L}_m$&lt;/li>
+&lt;li>每一个变量 $x$都对应两个 vector clock: $\mathbb{W}_x$ 和 $\mathbb{R}_x$。对于任意一个线程 $t$，$\mathbb{W}_x[t]$ 和 $\mathbb{R}_x[t]$ 记录了线程 $t$ 对变量 $x$ 的最后一次读/写的 clock
+&lt;ul>
+&lt;li>线程 $t$ 对变量 $x$ 的读时，会将 $\mathbb{R}_x[t]$ 的值更新为 $\mathbb{VC}_t[t]$ 的值&lt;/li>
+&lt;li>程序 $t$ 对变量 $x$ 的写时，会将 $\mathbb{W}_x[t]$ 的值更新为 $\mathbb{VC}_t[t]$ 的值&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;li>程序中执行同步和线程操作时，算法会更新相应的 vector clock：
+&lt;ul>
+&lt;li>$rel(t, m)$。线程 $u$ 释放了锁 $m$，先将 $\mathbb{L}_m$ 的值更新为 $\mathbb{VC}_u$ 的值，再将 $\mathbb{VC}_u[u]++$&lt;/li>
+&lt;li>$acq(t, m)$。线程 $t$ 获取了锁 $m$，将 $\mathbb{VC}_t$ 的值更新为 $\mathbb{VC}_t \sqcup \mathbb{L}_m$ 的值&lt;/li>
+&lt;li>$fork(t, u)$。先将 $\mathbb{VC}_u$ 的值更新为 $\mathbb{VC}_u \sqcup \mathbb{VC}_t$，再将 $\mathbb{VC}_t[t]++$&lt;/li>
+&lt;li>$join(t, u)$。先将 $\mathbb{VC}_t$ 的值更新为 $\mathbb{VC}_t\sqcup \mathbb{VC}_u$，再将 $\mathbb{VC}_u[u]++$&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;li>判断是否存在 data race：
+&lt;ul>
+&lt;li>假设当前线程 $u$ 读变量 $x$，如果满足 $\mathbb{W_x} \sqsubseteq \mathbb{VC_u}$，那么当前线程 $u$ 对变量 $x$ 的读与之前其他线程对变量 $x$ 的写不存在 data race&lt;/li>
+&lt;li>假设当前线程 $u$ 写变量 $x$，如果 $\mathbb{W_x} \sqsubseteq \mathbb{VC_u}$ 且 $\mathbb{R_x} \sqsubseteq \mathbb{VC_u}$ 那么当前线程 $u$ 对变量 $x$ 的写与之前其他线程对变量 $x$ 的写和读不存在 data race&lt;/li>
+&lt;/ul>
+&lt;/li>
+&lt;/ul>
+&lt;hr>
+&lt;p>下面还是通过一个例子来说明如何应用 vector clock 检测多线程程序中的 data race：&lt;/p>
+&lt;ul>
+&lt;li>
+&lt;p>考虑多线程程序中有两个线程 A 和 B，有一个锁 $m$ ，还有一个变量 $x$&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>线程 $A$ 对应的 vector clock 记作 $\mathbb{VC}_A$，线程 $B$ 对应的 vector clock 记作 $\mathbb{VC}_B$，锁 $m$ 对应的 vector clock 记作 $\mathbb{L}_m$，变量 $x$ 对应的写/读 vector clock 记作 $\mathbb{W}_x$ 和 $\mathbb{R}_x$&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>假设多线程程序某一个时刻的运行状态如下图所示：&lt;/p>
+&lt;p>&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-11-32-22-image.png" alt="">&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>此时线程 $A$ 执行语句 &lt;code>x = 0&lt;/code> 写变量 $x$，我们需要检查当前线程对变量 $x$ 的写与之前其他线程对变量 $x$ 的写和读之间是否存在 data race，即判断 $\mathbb{W_x} \sqsubseteq \mathbb{VC_u}$ 和 $\mathbb{R_x} \sqsubseteq \mathbb{VC_u}$ 是否满足。&lt;/p>
+&lt;p>显然 $[3, 0] \sqsubseteq [4,1]$ 和 $[0, 1] \sqsubseteq [4,1]$ 都满足，即本次线程 $A$ 执行语句 &lt;code>x = 0&lt;/code> 写变量 $x$ 与之前其他线程对变量 $x$ 的写和读之间不存在 data race&lt;/p>
+&lt;p>&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-11-34-10-image.png" alt="">&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>因为线程 $A$ 执行语句 &lt;code>x = 0&lt;/code> 写了变量 $x$，我们要更新 $\mathbb{W}_x$ 的值，将 $\mathbb{W}_x[A]$ 的值更新为 $\mathbb{VC}_A[A]$ 的值：&lt;/p>
+&lt;p>&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-11-34-59-image.png" alt="">&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>程序继续执行，此时线程 $A$ 执行语句 &lt;code>rel(m)&lt;/code> 释放锁 $m$，先将 $\mathbb{L}_m$ 的值更新为 $\mathbb{VC}_A$ 的值，再将 $\mathbb{VC}_A[A]++$&lt;/p>
+&lt;p>&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-11-40-30-image.png" alt="">&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>程序继续执行，此时线程 $B$ 执行语句 &lt;code>acq(m)&lt;/code> 申请锁 $m$，将 $\mathbb{VC}_B$ 的值更新为 $\mathbb{VC}_B \sqcup \mathbb{L}_m$ 的值&lt;/p>
+&lt;p>&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-11-41-22-image.png" alt="">&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>线程 $B$ 执行语句 &lt;code>x = 1&lt;/code> 写变量 $x$ ，我们需要检查当前线程对变量 $x$ 的写与之前其他线程对变量 $x$ 的写和读之间是否存在 data race，即判断 $\mathbb{W_x} \sqsubseteq \mathbb{VC_u}$ 和 $\mathbb{R_x} \sqsubseteq \mathbb{VC_u}$ 是否满足。&lt;/p>
+&lt;p>显然 $[4, 0] \sqsubseteq [4,8]$ 和 $[0, 1] \sqsubseteq [4,8]$ 都满足，即本次线程 $B$ 执行语句 &lt;code>x = 1&lt;/code> 写变量 $x$ 与之前其他线程对变量 $x$ 的写和读之间不存在 data race。&lt;/p>
+&lt;p>因为线程 $B$ 执行语句 &lt;code>x = 1&lt;/code> 写变量 $x$，我们要更新 $\mathbb{W}_x$ 的值，将 $\mathbb{W}_x[B]$ 的值更新为 $\mathbb{VC}_B[B]$ 的值：&lt;/p>
+&lt;p>&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-11-43-57-image.png" alt="">&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>线程 $A$ 执行语句 &lt;code>y = x&lt;/code> 读变量 $x$，我们需要检查当前线程对变量 $x$ 的读与之前其他线程对变量 $x$ 的写之间是否存在 data race，即判断 $\mathbb{W_x} \sqsubseteq \mathbb{VC_u}$ 是否满足。&lt;/p>
+&lt;p>显然 $[4, 8] \sqsubseteq [5,1]$ &lt;strong>不满足&lt;/strong>，即本次线程 $B$ 执行语句 &lt;code>x = 1&lt;/code> 写变量 $x$ 与之前其他线程对变量 $x$ 的读之间&lt;strong>存在 data race&lt;/strong>。&lt;/p>
+&lt;p>即我们检测到线程 $A$ 执行语句 &lt;code>y = x&lt;/code> 读变量 $x$ 与之前其他线程对变量 $x$ 的写和读之间&lt;strong>存在 data race&lt;/strong>。更具体地说是线程 $A$ 执行语句 &lt;code>y = x&lt;/code> 读变量 $x$ 与之前线程 $B$ 执行语句 &lt;code>x = 1&lt;/code> 读变量 $x$ 存在 data race。&lt;/p>
+&lt;p>&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-11-45-55-image.png" alt="">&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;h2 id="threadsanitizer-internals">ThreadSanitizer Internals&lt;/h2>
+&lt;p>ThreadSanitizer 检测 data race 的思想其实就是基于 vector clock 算法的，只不过在实现时做了一些取舍。比如对于每一个变量 $x$，ThreadSanitizer 不会记录所有线程最近一次对变量 $x$ 的读写，ThreadSanitizer 只会记录最近 4 次对变量 $x$ 的读写。&lt;/p>
+&lt;p>ThreadSanitizer 由编译时插桩和运行时库两部分组成。&lt;/p>
+&lt;ul>
+&lt;li>编译时插桩：对于每一次 memory access (load, store)，都会在此次 acccess 之前插入一个函数调用 (&lt;code>__tsan_read&lt;/code>, &lt;code>__tsan_write&lt;/code>)，该函数调用是在运行时库中实现的。&lt;/li>
+&lt;li>运行时库：在 &lt;code>__tsan_read&lt;/code>, &lt;code>__tsan_write&lt;/code> 中实现 data race 检测的核心逻辑，判断本次访问是否存在 data race。劫持了很多函数实现如 libc 和 pthread，在申请锁、释放锁，fork/join 线程时更新 vector clock 。&lt;/li>
+&lt;/ul>
+&lt;p>例如，本文最开始提到的全局变量数据竞争的代码片段使用 ThreadSanitizer 插桩后的代码变为如下所示：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-cpp" data-lang="cpp">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">int&lt;/span> global;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#a6e22e">Thread1&lt;/span>() {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> __tsan_func_entry(__builtin_return_address(&lt;span style="color:#ae81ff">0&lt;/span>));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> __tsan_write4(&lt;span style="color:#f92672">&amp;amp;&lt;/span>global);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> global &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#ae81ff">1&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> __tsan_func_exit();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">void&lt;/span> &lt;span style="color:#a6e22e">Thread2&lt;/span>() {
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> __tsan_func_entry(__builtin_return_address(&lt;span style="color:#ae81ff">0&lt;/span>));
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> __tsan_write4(&lt;span style="color:#f92672">&amp;amp;&lt;/span>global);
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> global &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#ae81ff">2&lt;/span>;
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> __tsan_func_exit();
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>}
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;p>注意到：在 &lt;code>global = 1&lt;/code> 和 &lt;code>global = 2&lt;/code> 之前都插入了对 &lt;code>__tsan_write4&lt;/code> 的函数调用。&lt;/p>
+&lt;hr>
+&lt;p>启用 ThreadSanitizer 后，在程序运行过程中，每一个线程都会保存一个 vector clock，每 8-bytes 的应用程序内存都对应有 4 个 8-bytes 的 shadow word。每个 shadow word 都用于记录一次访问操作，记录 TID（线程 id）、Epoch（访存操作发生时线程 TID 此时的 local time）、Pos:Size（标识本次访存访问的是当前 8-bytes 的哪几个 bytes）、IsWrite（标识本次访存操作是读还是写）。&lt;/p>
+&lt;p>每次读写变量 $x$ 时，由于程序被 ThreadSanitizer 插桩，所以在执行读写操作之前，都会调用函数 &lt;code>__tsan_read&lt;/code> 或 &lt;code>__tsan_write&lt;/code>，在&lt;code>__tsan_read&lt;/code> 和 &lt;code>__tsan_write&lt;/code>的函数实现中，首先找到变量 $x$ 所在的 8-bytes 内存区域。然后找到这 8-bytes 内存所对应的 4 个 shadow word，检查当前这一次对变量 $x$ 的读写与shadow word 中记录的最近 4 次读写是否存在 data race。最后更新 shadow word 的内容，记录本次对变量 $x$ 的读写，保证 shadow word 记录的是最近 4 次对变量 $x$ 的读写。&lt;/p>
+&lt;p>&lt;img src="https://enna1.github.io/blog/dissecting-thread-sanitizer/2022-10-20-12-04-08-image.png" alt="">&lt;/p>
+&lt;p>完整的 ThreadSanitizer 算法的伪代码如下所示：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;">&lt;code class="language-python" data-lang="python">&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">def&lt;/span> &lt;span style="color:#a6e22e">HandleMemoryAccess&lt;/span>(thread_state, tid, pc, addr, size, is_write, is_atomic):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> shadow_mem &lt;span style="color:#f92672">=&lt;/span> MemToShadow(addr) &lt;span style="color:#75715e"># the type of shadow_mem is uint64_t*&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> IncrementThreadClock(tid)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> LogEvent(tid, pc)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> new_shadow_word &lt;span style="color:#f92672">=&lt;/span> ShadowWord(tid, CurrentClock(tid), addr, size, is_write, is_atomic)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> stored &lt;span style="color:#f92672">=&lt;/span> false
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">for&lt;/span> i &lt;span style="color:#f92672">in&lt;/span> range(&lt;span style="color:#ae81ff">0&lt;/span>, &lt;span style="color:#ae81ff">4&lt;/span>):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> raced &lt;span style="color:#f92672">=&lt;/span> UpdateOneShadowState(thread_state, shadow_mem, i, new_shadow_word, stored)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> raced:
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> &lt;span style="color:#f92672">not&lt;/span> stored:
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e"># Evict a random Shadow Word&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> shadow_mem[Random(&lt;span style="color:#ae81ff">4&lt;/span>)] &lt;span style="color:#f92672">=&lt;/span> store_word &lt;span style="color:#75715e"># Atomic&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">def&lt;/span> &lt;span style="color:#a6e22e">UpdateOneShadowState&lt;/span>(shadow_mem, idx, new_shadow_word, stored):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> old_shadow_word &lt;span style="color:#f92672">=&lt;/span> shadow_mem[idx] &lt;span style="color:#75715e"># Atomic&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e"># The old state is empty&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> old_shadow_word &lt;span style="color:#f92672">==&lt;/span> &lt;span style="color:#ae81ff">0&lt;/span>:
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> &lt;span style="color:#f92672">not&lt;/span> stored:
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> StoreIfNotYetStored(shadow_mem[idx], store_word)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> stored &lt;span style="color:#f92672">=&lt;/span> true
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> false
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e"># Is the memory access equal to the previous?&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> AccessedSameRegion(old_shadow_word, new_shadow_word):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> SameThreads(old_shadow_word, new_shadow_word): &lt;span style="color:#75715e"># same thread&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> IsRWWeakerOrEqual(old_shadow_word, new_shadow_word):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> StoreIfNotYetStored(shadow_mem[idx], store_word)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> stored &lt;span style="color:#f92672">=&lt;/span> true
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> false
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> HappensBefore(old_shadow_word, thread_state):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> false
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> IsBothReadsOrAtomic(old_shadow_word, new_shadow_word):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> false
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e"># race!&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> ReportRace(old_shadow_word, new_shadow_word)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> true
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e"># Do the memory access intersect?&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> AccessedIntersectingRegions(old_shadow_word, new_shadow_word):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> SameThreads(old_shadow_word, new_shadow_word):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> false
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> IsBothReadsOrAtomic(old_shadow_word, new_shadow_word):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> false
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">if&lt;/span> HappensBefore(old_shadow_word, thread_state):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> false
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e"># race!&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> ReportRace(old_shadow_word, new_shadow_word)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> true
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#75715e"># The accesses do not intersect, do nothing&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> false
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">def&lt;/span> &lt;span style="color:#a6e22e">StoreIfNotYetStored&lt;/span>(shadow_mem, store_word):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#f92672">*&lt;/span>shadow_mem &lt;span style="color:#f92672">=&lt;/span> store_word &lt;span style="color:#75715e"># Atomic&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> store_word &lt;span style="color:#f92672">=&lt;/span> &lt;span style="color:#ae81ff">0&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">def&lt;/span> &lt;span style="color:#a6e22e">IsRWWeakerOrEqual&lt;/span>(old_shadow_word, new_shadow_word):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> (old_shadow_word&lt;span style="color:#f92672">.&lt;/span>is_atomic &lt;span style="color:#f92672">&amp;gt;&lt;/span> new_shadow_word&lt;span style="color:#f92672">.&lt;/span>is_atomic) &lt;span style="color:#f92672">||&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> (old_shadow_word&lt;span style="color:#f92672">.&lt;/span>is_atomic &lt;span style="color:#f92672">==&lt;/span> new_shadow_word&lt;span style="color:#f92672">.&lt;/span>is_atomic &lt;span style="color:#f92672">&amp;amp;&amp;amp;&lt;/span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#960050;background-color:#1e0010">!&lt;/span>old_shadow_word&lt;span style="color:#f92672">.&lt;/span>is_write &lt;span style="color:#f92672">&amp;gt;=&lt;/span> &lt;span style="color:#960050;background-color:#1e0010">!&lt;/span>new_shadow_word&lt;span style="color:#f92672">.&lt;/span>is_write)
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span>&lt;span style="color:#66d9ef">def&lt;/span> &lt;span style="color:#a6e22e">HappensBefore&lt;/span>(old_shadow_word, thread_state):
+&lt;/span>&lt;/span>&lt;span style="display:flex;">&lt;span> &lt;span style="color:#66d9ef">return&lt;/span> thread_state&lt;span style="color:#f92672">.&lt;/span>vector_clock&lt;span style="color:#f92672">.&lt;/span>get(old_shadow_word&lt;span style="color:#f92672">.&lt;/span>tid) &lt;span style="color:#f92672">&amp;gt;=&lt;/span> old_shadow_word&lt;span style="color:#f92672">.&lt;/span>epoch
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/div>&lt;h2 id="references">References&lt;/h2>
+&lt;ol>
+&lt;li>&lt;a href="https://lamport.azurewebsites.net/pubs/time-clocks.pdf">Lamport, L., 1978. Time, clocks, and the ordering of events in a distributed system.Communications of the ACM,21(7), pp.558-565.&lt;/a>&lt;/li>
+&lt;li>&lt;a href="https://users.soe.ucsc.edu/~cormac/papers/pldi09.pdf">Cormac Flanagan and Stephen N. Freund. 2009. FastTrack: efficient and precise dynamic race detection. (PLDI &amp;lsquo;09)&lt;/a>&lt;/li>
+&lt;li>&lt;a href="https://gcc.gnu.org/wiki/cauldron2012?action=AttachFile&amp;amp;do=get&amp;amp;target=kcc.pdf">Finding races and memory errors with GCC instrumentation. (GNU Tools Cauldron 2012)&lt;/a>&lt;/li>
+&lt;li>&lt;a href="https://developers.google.com/google-test-automation-conference/2013/presentations-day2#Day2Presentation6">AddressSanitizer, ThreadSanitizer and MemorySanitizer &amp;ndash; Dynamic Testing Tools for C++. (Google Test Automation Conference)&lt;/a>&lt;/li>
+&lt;li>&lt;a href="https://en.wikipedia.org/wiki/Lamport_timestamp">https://en.wikipedia.org/wiki/Lamport_timestamp&lt;/a>&lt;/li>
+&lt;li>&lt;a href="https://en.wikipedia.org/wiki/Vector_clock">https://en.wikipedia.org/wiki/Vector_clock&lt;/a>&lt;/li>
+&lt;/ol></description></item><item><title>How Sanitizer Get Stack Trace</title><link>https://enna1.github.io/post/how-sanitizer-get-stacktrace/</link><pubDate>Tue, 18 Oct 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/how-sanitizer-get-stacktrace/</guid><description>&lt;p>本文以 ASan 为例分析 sanitizer runtime 是如何获取和保存 stack trace 的。&lt;/p>
 &lt;p>Sanitizer 非常好用的一个原因就是报告的内容非常详细。例如 ASan 检测到一个 heap-use-after-free 类型的 bug，在报告中不仅会给出执行哪行代码时触发了 heap-use-after-free，还会给出这块堆内存是在哪里被申请的，又是在哪里被释放的。&lt;/p>
 &lt;p>例如下面这个 heap-use-after-free 的例子：&lt;/p>
 &lt;ul>
@@ -493,7 +804,7 @@ rbp 0x0 0x0
 &lt;li>
 &lt;p>&lt;a href="https://developers.facebook.com/blog/post/2021/09/23/async-stack-traces-folly-synchronous-asynchronous-stack-traces/">https://developers.facebook.com/blog/post/2021/09/23/async-stack-traces-folly-synchronous-asynchronous-stack-traces/&lt;/a>&lt;/p>
 &lt;/li>
-&lt;/ol></description></item><item><title>How Sanitizer Interceptor Works</title><link>https://enna1.github.io/post/howsanitizerinterceptorworks/</link><pubDate>Sun, 18 Sep 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/howsanitizerinterceptorworks/</guid><description>&lt;p>本文分析了 sanitizer 是如何做到替换 malloc, free, memcpy 这些库函数的实现的。即 sanitizer 中的 interceptor 机制。&lt;/p>
+&lt;/ol></description></item><item><title>How Sanitizer Interceptor Works</title><link>https://enna1.github.io/post/how-sanitizer-interceptor-works/</link><pubDate>Sun, 18 Sep 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/how-sanitizer-interceptor-works/</guid><description>&lt;p>本文分析了 sanitizer 是如何做到替换 malloc, free, memcpy 这些库函数的实现的。即 sanitizer 中的 interceptor 机制。&lt;/p>
 &lt;p>我们在前面的文章中提到，所有的 Sanitizer 都由编译时插桩 (compile-time instrumentation) 和运行时库 (run-time library) 两部分组成。&lt;/p>
 &lt;p>那么 sanitizer 的运行时库中做了哪些事情呢？&lt;/p>
 &lt;p>以 ASan 为例：&lt;/p>
@@ -830,7 +1141,7 @@ $ readelf -sW --dyn-syms $(clang -print-file-name=libclang_rt.asan-x86_64.so) | 
 &lt;li>
 &lt;p>&lt;a href="https://github.com/llvm/llvm-project/commit/7fb7330469af52ae1313b2b47c273e62c61a4dd5">asan/tsan: weak interceptors · llvm/llvm-project@7fb7330 · GitHub&lt;/a>&lt;/p>
 &lt;/li>
-&lt;/ol></description></item><item><title>How Sanitizer Runtime Initialized</title><link>https://enna1.github.io/post/howsanitizerruntimeinit/</link><pubDate>Wed, 17 Aug 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/howsanitizerruntimeinit/</guid><description>&lt;p>本文分析了 sanitizer runtime 是如何做到在程序启动之前进行初始化的。&lt;/p>
+&lt;/ol></description></item><item><title>How Sanitizer Runtime Initialized</title><link>https://enna1.github.io/post/how-sanitizer-runtime-init/</link><pubDate>Wed, 17 Aug 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/how-sanitizer-runtime-init/</guid><description>&lt;p>本文分析了 sanitizer runtime 是如何做到在程序启动之前进行初始化的。&lt;/p>
 &lt;h2 id="what-is-a-sanitizer">What is a sanitizer?&lt;/h2>
 &lt;p>Sanitizers 是由 Google 开源的动态代码分析工具，包括：&lt;/p>
 &lt;ul>
@@ -1032,7 +1343,7 @@ retq
 &lt;li>
 &lt;p>&lt;a href="https://maskray.me/blog/2021-11-07-init-ctors-init-array">https://maskray.me/blog/2021-11-07-init-ctors-init-array&lt;/a>&lt;/p>
 &lt;/li>
-&lt;/ol></description></item><item><title>How To Write A Dumb Sanitizer</title><link>https://enna1.github.io/post/dumbsanitizerhowto/</link><pubDate>Thu, 02 Jun 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/dumbsanitizerhowto/</guid><description>&lt;p>本文描述了如何实现一个简单的 sanitizer 。&lt;/p>
+&lt;/ol></description></item><item><title>How To Write A Dumb Sanitizer</title><link>https://enna1.github.io/post/dumb-sanitizer-howto/</link><pubDate>Thu, 02 Jun 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/dumb-sanitizer-howto/</guid><description>&lt;p>本文描述了如何实现一个简单的 sanitizer 。&lt;/p>
 &lt;p>本文所实现的 DumbSanitizer 的完整代码见 &lt;a href="https://gist.github.com/Enna1/f8696072bd9dc36ac236ba63839b7c16">DumbSanitizer.patch · GitHub&lt;/a>，基于 llvm 14.0.4。&lt;/p>
 &lt;h2 id="introduction--what-is-a-sanitizer">Introduction — What is a sanitizer?&lt;/h2>
 &lt;p>Sanitizers 是由 Google 开源的动态代码分析工具，包括：&lt;/p>
