@@ -1,4 +1,71 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Enna1's blog</title><link>https://enna1.github.io/</link><description> Enna1's blog</description><generator>Hugo -- gohugo.io</generator><language>en-us</language><lastBuildDate>Thu, 20 Oct 2022 00:00:00 +0000</lastBuildDate><atom:link href="https://enna1.github.io/index.xml" rel="self" type="application/rss+xml"/><item><title>Dissecting ThreadSanitizer Algorithm</title><link>https://enna1.github.io/post/dissecting-thread-sanitizer/</link><pubDate>Thu, 20 Oct 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/dissecting-thread-sanitizer/</guid><description>&lt;p>本文深入剖析 ThreadSanitizer(V2) 检测 Data Race 背后的算法原理。&lt;/p>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Enna1's blog</title><link>https://enna1.github.io/</link><description> Enna1's blog</description><generator>Hugo -- gohugo.io</generator><language>en-us</language><lastBuildDate>Mon, 31 Oct 2022 00:00:00 +0000</lastBuildDate><atom:link href="https://enna1.github.io/index.xml" rel="self" type="application/rss+xml"/><item><title>Ep 4. 职场新人进化篇</title><link>https://enna1.github.io/podcast/episod-4/</link><pubDate>Mon, 31 Oct 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/podcast/episod-4/</guid><description>&lt;p>这一期我们要一起聊一聊职场新人 &amp;amp; 职场发展。&lt;/p>
+&lt;blockquote>
+&lt;p>本期嘉宾：@罗杰&lt;/p>
+&lt;p>本期主播：@西瓜 @余扬&lt;/p>
+&lt;p>音频剪辑：@西瓜&lt;/p>
+&lt;p>文案编辑：@余扬&lt;/p>
+&lt;/blockquote>
+&lt;p>有的小伙伴可能已经发现，这一期和以往有很大不同，如果你还没有注意的话，再往上面几行看一看，现在有没有什么新的发现呢~&lt;/p>
+&lt;p>是的，当当当当~本期 @罗杰 变成嘉宾啦，上一期和我们聊天的小伙伴 @西瓜 在本期摇身一变，变成了主持人，和小余一起来对小罗进行深度专访&lt;/p>
+&lt;p>本期我们的话题还是聚焦在职场上，因为小罗老师虽然工作时间不长，但他是一个求职时有想法、工作后有规划、上班后还能按时学习充实自己的人，并且还能在别人（比如我TT）的工作生活遇到瓶颈时即给予意见，所以，这次我们就要就这些问题向小罗老师取一取经，希望我们的分享也能帮助到更多的人&lt;/p>
+&lt;hr>
+&lt;h2 id="时间轴">时间轴&lt;/h2>
+&lt;ul>
+&lt;li>
+&lt;p>00:00-05:00
+小罗老师的自我介绍；&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>05:00-16:06
+从学生到职场新人的转变阶段：花了多长时间适应现在的新身份呢，又是怎么调节自身定位、完成心态的改变呢；&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>16:06-24:20
+作为职场新人，那些需要提升的能力；&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>24:20-38:40
+作为职场新人，那些工作中需要注意的地方；&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>38:40-48:40
+你的职业生涯规划；&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>48:40-65:28
+那些为了平衡工作和生活而付出的努力；&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>71:22-82:50
+有哪些感受想要分享给还没有工作的人？&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>82:50-93:15
+在工作中是如何保持学习的呢？&lt;/p>
+&lt;/li>
+&lt;li>
+&lt;p>93:15
+本期的好物推荐环节&lt;/p>
+&lt;/li>
+&lt;/ul>
+&lt;hr>
+&lt;h2 id="推荐环节">推荐环节&lt;/h2>
+&lt;p>下面进入我们播客的保留环节~&lt;/p>
+&lt;p>每一期我们的主播和嘉宾都会推荐一个自己喜欢的“内容”，它可以是一本书，也可以是一个电影、一个游戏，只要是大家想要推荐的东西。本期，我们一共推荐了以下三个“内容”：&lt;/p>
+&lt;p>@罗杰 | Listen1&lt;/p>
+&lt;blockquote>
+&lt;p>“一款听歌软件。嘘。”&lt;/p>
+&lt;/blockquote>
+&lt;p>@余扬 | 《了不起的我》&lt;/p>
+&lt;blockquote>
+&lt;p>“一本关于自我发展心理学的书籍，可用于心理自助。咨询师出身的作者总结了多年来向他咨询的患者们的问题，以及这些问题背后的心理学机制、可以从哪些方面入手改变。‘带着问题去生活’、‘努力控制你能控制的事情，并接纳你不能控制的事情’。”&lt;/p>
+&lt;/blockquote>
+&lt;p>@西瓜 | 《活下去的理由》&lt;/p>
+&lt;blockquote>
+&lt;p>“emo已经是被大家经常拿来用的词，但真正的抑郁症并没有那么简单。本书的作者是一个抑郁症患者，讲述了他从抑郁症的发病、经历以及战胜抑郁症的过程，是一本有重量、有质感的书籍。‘真正的解决方法一定要在自己身上探索出来’——这个道理同样也适用于别的事情，复制前人的路还是要有限，要走出自己的道路。”&lt;/p>
+&lt;/blockquote>
+&lt;p>以上，就是本期的全部内容，我们下期再见。&lt;/p>
+&lt;p>最后的最后再打一个小广告，我们除了在【小宇宙APP】【徐徐道来】更新，也会在微信公众号【徐徐道来播客】上同步更新，搜索即可订阅，欢迎你哦~&lt;/p></description></item><item><title>Dissecting ThreadSanitizer Algorithm</title><link>https://enna1.github.io/post/dissecting-thread-sanitizer/</link><pubDate>Thu, 20 Oct 2022 00:00:00 +0000</pubDate><guid>https://enna1.github.io/post/dissecting-thread-sanitizer/</guid><description>&lt;p>本文深入剖析 ThreadSanitizer(V2) 检测 Data Race 背后的算法原理。&lt;/p>
 &lt;h2 id="introduction">Introduction&lt;/h2>
 &lt;p>ThreadSanitizer(AKA TSan) 是一个集成在 GCC 和 Clang 中的动态分析工具，能够检测 C++ 代码中大多数的数据竞争 (data race) 。它由编译时插桩和运行时库两部分组成，通过编译和链接时添加参数 &lt;code>-fsanitize=thread&lt;/code>，就可以在运行时检测 data race 。&lt;/p>
 &lt;h2 id="data-race">Data Race&lt;/h2>
