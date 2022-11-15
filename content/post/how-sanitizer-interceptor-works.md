@@ -2,12 +2,11 @@
 title: "How Sanitizer Interceptor Works"
 date: 2022-09-18
 categories:
-  - "Sanitizer"
-  - "LLVM"
+  - "Programming"
 tags:
   - "Sanitizer"
   - "LLVM"
-# comments: true # Enable Disqus comments for specific page
+comments: true # Enable Disqus comments for specific page
 ---
 
 本文分析了 sanitizer 是如何做到替换 malloc, free, memcpy 这些库函数的实现的。即 sanitizer 中的 interceptor 机制。

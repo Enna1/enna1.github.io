@@ -2,12 +2,11 @@
 title: "How To Write A Dumb Sanitizer"
 date: 2022-06-02
 categories:
-  - "Sanitizer"
-  - "LLVM"
+  - "Programming"
 tags:
   - "Sanitizer"
   - "LLVM"
-# comments: true # Enable Disqus comments for specific page
+comments: true # Enable Disqus comments for specific page
 ---
 
 本文描述了如何实现一个简单的 sanitizer 。

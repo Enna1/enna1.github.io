@@ -2,13 +2,12 @@
 title: "Dissecting ThreadSanitizer Algorithm"
 date: 2022-10-20
 categories:
-  - "Sanitizer"
-  - "LLVM"
+  - "Programming"
 tags:
 - "Sanitizer"
 - "LLVM"
 katex: true
-# comments: true # Enable Disqus comments for specific page
+comments: true # Enable Disqus comments for specific page
 
 ---
 
@@ -147,6 +146,7 @@ vector clock 算法如下：
 - Process $R$ 发生内部事件 $p_3$，更新 vector clock：$VC_3 = [0,0,0+1]=[0,0,1]$
 
 - process $Q$ 于事件 $q_2$ 接收由 process $P$ 于事件 $p_2$ 发送的消息，更新 vector clock：
+
   - $VC_1[1] = 1 + 1 = 2, VC_1 = [2, 0, 0]$
   - $VC_2[2] = 1 + 1 = 2, VC_2 = [0,2,0]$
   - $VC_2 = max(VC_1, VC_2) = [max(2,0), max(0,2), max(0,0)]=[2,2,0]$

@@ -2,12 +2,11 @@
 title: "How Sanitizer Get Stack Trace"
 date: 2022-10-18
 categories:
-  - "Sanitizer"
-  - "LLVM"
+  - "Programming"
 tags:
   - "Sanitizer"
   - "LLVM"
-# comments: true # Enable Disqus comments for specific page
+comments: true # Enable Disqus comments for specific page
 ---
 
 本文以 ASan 为例分析 sanitizer runtime 是如何获取和保存 stack trace 的。

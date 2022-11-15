@@ -2,7 +2,7 @@ baseURL = 'https://enna1.github.io/'
 languageCode = 'en-us'
 title = "Enna1's blog"
 theme = "mainroad"
-# disqusShortname = "Enna1" # Enable Disqus comments by entering your Disqus shortname
+disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Disqus shortname
 
 [Author] # Used in authorbox
   name = "Enna1"
