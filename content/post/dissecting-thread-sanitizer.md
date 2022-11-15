@@ -8,7 +8,7 @@ tags:
 - "LLVM"
 katex: true
 comments: true # Enable Disqus comments for specific page
-
+toc: true
 ---
 
 本文深入剖析 ThreadSanitizer(V2) 检测 Data Race 背后的算法原理。

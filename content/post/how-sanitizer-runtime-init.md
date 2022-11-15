@@ -7,6 +7,7 @@ tags:
   - "Sanitizer"
   - "LLVM"
 comments: true # Enable Disqus comments for specific page
+toc: true
 ---
 
 本文分析了 sanitizer runtime 是如何做到在程序启动之前进行初始化的。

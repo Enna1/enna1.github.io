@@ -7,6 +7,7 @@ tags:
   - "Sanitizer"
   - "LLVM"
 comments: true # Enable Disqus comments for specific page
+toc: true
 ---
 
 本文描述了如何实现一个简单的 sanitizer 。
