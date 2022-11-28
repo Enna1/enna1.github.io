@@ -1,6 +1,6 @@
 baseURL = 'https://enna1.github.io/'
 languageCode = 'en-us'
-title = "Enna1's blog"
+title = "Enna1's website"
 theme = "mainroad"
 disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Disqus shortname
 
@@ -9,7 +9,7 @@ disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Di
   bio = "Nobody dies a virgin, life fucks us all!"
 
 [Params]
-  description = "Enna1's blog" # Site description. Used in meta description
+  description = "Enna1's website" # Site description. Used in meta description
   copyright = "Enna1" # Footer copyright holder, otherwise will use site title
   opengraph = true
   twitter_cards = false
@@ -101,6 +101,6 @@ disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Di
   Title = "徐徐道来"
   local = false
   cdn = false
-  Description = "徐徐道来播客，朋友们一起聊天的地方"
+  Description = "欢迎来到「徐徐道来」播客，我和朋友们会在这里分享记录我们的故事（微信公众号：徐徐道来播客）"
   Lang = "zh-cn"
   image = "podcast/logo.jpg" # Podcast logo image. Path relative to "assets"
