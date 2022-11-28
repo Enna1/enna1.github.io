@@ -1,0 +1,463 @@
+<!doctype html><html class=no-js lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta http-equiv=x-ua-compatible content="IE=edge"><title>Strict Aliasing, TBAA and TypeSanitizer - Enna1's blog</title><script>(function(e,t){e[t]=e[t].replace("no-js","js")})(document.documentElement,"className")</script><meta name=description content><meta property="og:title" content="Strict Aliasing, TBAA and TypeSanitizer"><meta property="og:description" content="本文首先介绍了 C++ 中的 strict aliasing rule，然后深入分析编译器是如何利用 strict aliasing rule 对程序进行分析优化的，之后介绍了检测 strict aliasing violation 的动态分析工具 TypeSanitizer，最后介绍如何在编程时避免写出 strict aliasing violation 的代码。"><meta property="og:type" content="article"><meta property="og:url" content="https://enna1.github.io/post/strict_aliasing-tbaa-and-type_sanitizer/"><meta property="article:section" content="post"><meta property="article:published_time" content="2022-11-14T00:00:00+00:00"><meta property="article:modified_time" content="2022-11-14T00:00:00+00:00"><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link rel=dns-prefetch href=//fonts.googleapis.com><link rel=dns-prefetch href=//fonts.gstatic.com><link rel=stylesheet href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700"><link rel=stylesheet href=/css/style.css><link rel="shortcut icon" href=/favicon.ico></head><body class=body><div class="container container--outer"><header class=header><div class="container header__container"><div class=logo><a class=logo__link href=/ title="Enna1's blog" rel=home><div class="logo__item logo__text"><div class=logo__title>Enna1's blog</div><div class=logo__tagline>Nobody dies a virgin, life fucks us all!</div></div></a></div><nav class=menu><button class=menu__btn aria-haspopup=true aria-expanded=false tabindex=0>
+<span class=menu__btn-title tabindex=-1>Menu</span></button><ul class=menu__list><li class=menu__item><a class=menu__link href=/><span class=menu__text>home</span></a></li><li class=menu__item><a class=menu__link href=/post/><span class=menu__text>blog</span></a></li><li class=menu__item><a class=menu__link href=/podcast/><span class=menu__text>podcast</span></a></li><li class=menu__item><a class=menu__link href=/archives/><span class=menu__text>archives</span></a></li><li class=menu__item><a class=menu__link href=/about/><span class=menu__text>about</span></a></li></ul></nav></div></header><link rel=stylesheet href=/js/katex/katex.min.css><script src=/js/katex/katex.min.js></script><script src=/js/katex/contrib/auto-render.min.js></script>
+<script>document.addEventListener("DOMContentLoaded",function(){renderMathInElement(document.body,{delimiters:[{left:"$$",right:"$$",display:!0},{left:"$",right:"$",display:!1},{left:"\\(",right:"\\)",display:!1},{left:"\\[",right:"\\]",display:!0}]})})</script><div class="wrapper flex"><div class=primary><main class=main role=main><article class=post><header class=post__header><h1 class=post__title>Strict Aliasing, TBAA and TypeSanitizer</h1><div class="post__meta meta"><div class="meta__item-datetime meta__item"><svg class="meta__icon icon icon-time" width="16" height="14" viewBox="0 0 30 28"><path d="M15 0C7 0 1 6 1 14s6 14 14 14 14-6 14-14S23 0 15 0zm0 25C9 25 4 20 4 14S9 3 15 3s11 5 11 11-5 11-11 11zm1-18h-2v8.4l6.8 4.4L22 18l-6-3.8V7z"/></svg><time class=meta__text datetime=2022-11-14T00:00:00Z>November 14, 2022</time></div><div class="meta__item-categories meta__item"><svg class="meta__icon icon icon-category" width="16" height="16" viewBox="0 0 16 16"><path d="m7 2 1 2h8v11H0V2z"/></svg><span class=meta__text><a class=meta__link href=/categories/programming/ rel=category>Programming</a></span></div></div></header><div class="post__toc toc"><div class=toc__title>Page content</div><div class=toc__menu><nav id=TableOfContents><ul><li><a href=#strict-aliasing-rule>Strict Aliasing Rule</a></li><li><a href=#type-based-alias-analysis>Type Based Alias Analysis</a><ul><li><a href=#paper>Paper</a></li><li><a href=#implementation-in-llvm>Implementation in LLVM</a></li></ul></li><li><a href=#typesanitizer>TypeSanitizer</a><ul><li><a href=#shadow-mapping>Shadow Mapping</a></li><li><a href=#instrumentation>Instrumentation</a></li><li><a href=#runtime-library>Runtime Library</a></li><li><a href=#case-study>Case Study</a></li></ul></li><li><a href=#ps>P.S.</a></li><li><a href=#references>References</a></li></ul></nav></div></div><div class="content post__content clearfix"><p>本文首先介绍了 C++ 中的 strict aliasing rule，然后深入分析编译器是如何利用 strict aliasing rule 对程序进行分析优化的，之后介绍了检测 strict aliasing violation 的动态分析工具 TypeSanitizer，最后介绍如何在编程时避免写出 strict aliasing violation 的代码。</p><h2 id=strict-aliasing-rule>Strict Aliasing Rule</h2><p>首先，我们通过一个例子看下 strict aliasing rule 指的是什么？</p><p>考虑如下代码 <a href=https://godbolt.org/z/bjMMhjWaf>Compiler Explorer</a>：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;stdio.h&gt;</span><span style=color:#75715e>
+</span></span></span><span style=display:flex><span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;math.h&gt;</span><span style=color:#75715e>
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>float</span> <span style=color:#a6e22e>i_am_clever</span>(<span style=color:#66d9ef>unsigned</span> <span style=color:#66d9ef>int</span> <span style=color:#f92672>*</span>i, <span style=color:#66d9ef>float</span> <span style=color:#f92672>*</span>f) {
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>isnan(<span style=color:#f92672>*</span>f))
+</span></span><span style=display:flex><span>    <span style=color:#f92672>*</span>i <span style=color:#f92672>^=</span> <span style=color:#ae81ff>1</span> <span style=color:#f92672>&lt;&lt;</span> <span style=color:#ae81ff>31</span>;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> <span style=color:#f92672>*</span>f; <span style=color:#75715e>// Do we need to load *f again here?
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>main</span>() {
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>float</span> f <span style=color:#f92672>=</span> <span style=color:#ae81ff>5</span>;
+</span></span><span style=display:flex><span>  f <span style=color:#f92672>=</span> i_am_clever((<span style=color:#66d9ef>unsigned</span> <span style=color:#66d9ef>int</span> <span style=color:#f92672>*</span>) <span style=color:#f92672>&amp;</span>f, <span style=color:#f92672>&amp;</span>f);
+</span></span><span style=display:flex><span>  printf(<span style=color:#e6db74>&#34;%f</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, f);
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>上述代码，不管是 GCC 还是 Clang 在 O3 优化等级下运行结果都是 5.000000，但是在 O0 的优化等级下运行结果就是 -5.000000。如果在 O3 优化等级下再加 <code>-fno-strict-aliasing</code> 编译选项，此时运行结果就又变成了 -5.000000。</p><p>为什么会出现上述现象？简单来说就是上述代码因违反了 strict aliasing rule 而导致代码中存在定义行为 (Undefined Behavior, UB)，而一旦程序中有了未定义行为，则什么事情都有可能发生了。</p><p>有关 strict aliasing rule 在 <a href=https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/n4659.pdf>C++ 17 标准</a>中 [basic.lval] 一节有如下描述：</p><blockquote><p>If a program attempts to access the stored value of an object through a glvalue of other than one of the following types the behavior is undefined:</p><p>(8.1) — the dynamic type of the object,</p><p>(8.2) — a cv-qualified version of the dynamic type of the object,</p><p>(8.3) — a type similar (as defined in 7.5) to the dynamic type of the object,</p><p>(8.4) — a type that is the signed or unsigned type corresponding to the dynamic type of the object,</p><p>(8.5) — a type that is the signed or unsigned type corresponding to a cv-qualified version of the dynamic type of the object,</p><p>(8.6) — an aggregate or union type that includes one of the aforementioned types among its elements or nonstatic data members (including, recursively, an element or non-static data member of a subaggregate or contained union),</p><p>(8.7) — a type that is a (possibly cv-qualified) base class type of the dynamic type of the object,</p><p>(8.8) — a char, unsigned char, or std::byte type.</p><p>The intent of this list is to specify those circumstances in which an object may or may not be aliased.</p></blockquote><p><a href=https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/n4849.pdf>C++ 20 标准</a>中 [basic.lval] 一节的描述则更为精简：</p><blockquote><p>If a program attempts to access (3.1) the stored value of an object through a glvalue whose type is not similar (7.3.5) to one of the following types the behavior is undefined:</p><p>(11.1) — the dynamic type of the object,</p><p>(11.2) — a type that is the signed or unsigned type corresponding to the dynamic type of the object, or</p><p>(11.3) — a char, unsigned char, or std::byte type.</p><p>The intent of this list is to specify those circumstances in which an object may or may not be aliased.</p></blockquote><p>因为我不是 C++ language lawyer，所以也就不尝试一一解释上述标准中每一条描述的情况了，在 <a href=https://gist.github.com/shafik/848ae25ee209f698763cffee272a58f8#what-the-c17-draft-standard-say>What is Strict Aliasing and Why do we Care? · GitHub</a> 这篇文章中，作者对 C++ 17 标准中规定的每一种情况都列举了对应的示例代码来解释说明。</p><p>由于上述 C++ 标准的存在，所以编译器认为：如果两个指针指向的对象<strong>类型</strong>不同，那么这两个指针指向的就是不同的内存，或者说这两个指针没有别名关系，这就是 strict aliasing rule（char, unsigned char 和 std::byte 是例外，通过 char, unsigned char 或 std::byte 类型的指针能够合法访问任意其他类型的对象）。</p><p>回到我们最开始的例子，函数 <code>i_am_clever</code> 想实现的是：如果浮点数 float 不是 NaN (not-a-number)，那么就通过将其最高位取反（IEEE Floating Point 定义最高位是符号位），得到该浮点数的相反数。</p><p>因为函数 <code>i_am_clever</code> 的参数类型是 <code>unsigned int *i, float *f</code> ，编译器认为指针 <code>i</code> 和指针 <code>f</code> 指向的不是同一内存，所以编译器认为 <code>*i ^= 1 &lt;&lt; 31;</code> 这条语句不会修改 <code>*f</code> 的值，而函数 <code>i_am_clever</code> 的返回值是 <code>*f</code>，所以编译器将函数 <code>i_am_clever</code> 优化成类似如下代码的形式：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>float</span> <span style=color:#a6e22e>i_am_clever</span>(<span style=color:#66d9ef>unsigned</span> <span style=color:#66d9ef>int</span> <span style=color:#f92672>*</span>i, <span style=color:#66d9ef>float</span> <span style=color:#f92672>*</span>f) {
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>float</span> tmp <span style=color:#f92672>=</span> <span style=color:#f92672>*</span>f;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>isnan(tmp))
+</span></span><span style=display:flex><span>    <span style=color:#f92672>*</span>i <span style=color:#f92672>^=</span> <span style=color:#ae81ff>1</span> <span style=color:#f92672>&lt;&lt;</span> <span style=color:#ae81ff>31</span>;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> tmp;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>即在调用 <code>isnan</code> 时，<code>*f</code> 的值是多少，函数的返回值就是多少，这样就可以减少一次从内存中 load <code>*f</code> 的操作。这样就能理解为什么不管是 GCC 还是 Clang 在 O3 优化等级下上述例子的运行结果都是 5.000000 了。</p><p>那么问题来了，编译器是如何根据指针指向的对象类型来判断两个指针是否有别名关系的呢？答案是 Type Based Alias Analysis (TBAA)。下面 &ldquo;Type Based Alias Analysis&rdquo; 这一节将详细介绍 TBAA 的原理以及 LLVM 中的实现。</p><p>注：clang 在 O0 以上优化等级时会开 TBAA，如果添加 <code>-fno-strict-aliasing</code> 编译选项则不会开启 TBAA，<a href=https://github.com/llvm/llvm-project/blob/llvmorg-15.0.0/clang/lib/CodeGen/CodeGenTBAA.cpp#L226>llvm-project/CodeGenTBAA.cpp</a>。</p><h2 id=type-based-alias-analysis>Type Based Alias Analysis</h2><p>所谓 Alias Analysis 即别名分析（又称 Pointer Analyis 即指针分析），是编译器程序分析中的一种技术，简单来说就是用于判断两个指针是否指向内存中的同一对象。</p><p>别名分析有很多种算法，Type Based Alias Analysis (TBAA) 就是其中一种经典的算法。TBAA 算法由 Amer Diwan 等人在论文 <a href="https://dl.acm.org/citation.cfm?id=277670">Type-Based Alias Analysis - PLDI'98</a> 中提出，是一种适用于 type-safe 编程语言的高效而精确的别名分析算法。</p><p>在本节我们先学习下 TBAA 论文原文中的算法，然后再学习下 TBAA 在 LLVM 中的实现。</p><h3 id=paper>Paper</h3><p><a href="https://dl.acm.org/citation.cfm?id=277670">Type-Based Alias Analysis - PLDI'98</a> 这篇论文在介绍 TBAA 算法时是基于 Modula-3 这个编程语言来进行说明的，所以我们得先了解下 Modula-3 这个编程语言。</p><p>Modula-3 是一门 staticlly typed, type-safe 的编程语言。在 Modula-3 中有三种 memory referneces：</p><table><thead><tr><th>Notation</th><th>Name</th><th>Description</th></tr></thead><tbody><tr><td><code>p.f</code></td><td>Qualify</td><td>Access field <em>f</em> of object <em>p</em></td></tr><tr><td><code>p^</code></td><td>Deference</td><td>Deference pointer <em>p</em></td></tr><tr><td><code>p[i]</code></td><td>Subscript</td><td>Array <em>p</em> with subscript <em>i</em></td></tr></tbody></table><p>如上表所示，在 Modula-3 中 <code>p.f</code> 表示访问对象 <code>p</code> 的 <code>f</code> 字段；<code>p^</code> 表示对指针 <code>p</code> 解引用；<code>p[i]</code> 表示访问数组 <code>p</code> 的第 <code>i</code> 个元素。</p><p>在该论文中还有一些符号定义：</p><ul><li><p>将访问内存的表达式称为 <em>access path</em> ($\mathcal{AP}$)，例如 <code>a^.b[i].c</code> 就是一个 <em>access path</em>。</p></li><li><p>$Type(p)$ 表示 $\mathcal{AP}$ p 的 static type。</p></li><li><p>$Subtypes(T)$ 表示由类型 T 和 T 的所有子类型所构成的集合。</p></li></ul><p>并且在 Modula-3 中，类型转换只允许在基类和它的子类之间进行，同时类型 T 的 memory references 能够访问类型 T 及子类的所有字段。</p><p>论文中介绍了三种基于类型来做别名分析的算法：</p><ol><li><p><strong>TypeDecl</strong>：非常保守的分析，如果两个内存引用/指针具有<strong>相同的类型</strong>，就认为它们可能互为别名，即可能指向同一内存对象。</p></li><li><p><strong>FieldTypeDecl</strong>：使用字段的类型声明和程序的其他高级信息（如某个字段、数组元素是否被执行过<strong>取地址</strong>操作）来改进 TypeDecl，使得 FieldTypeDecl 的别名分析比 TypeDecl 更精确。</p></li><li><p><strong>SMTypeRefs</strong> (Selectively Merge Type References)：通过分析程序中的赋值语句 (assignments) 来更准确地实现别名分析。</p></li></ol><h4 id=typedecl>TypeDecl</h4><p>TypeDecl TBAA 的思想很简单，给定一个 $\mathcal{AP}$ p，TypeDecl 非常保守地认为 p 可能访问所有与 Type(p) 有相同类型或子类型的对象。</p><p>更形式化一点的定义：给定两个 $\mathcal{AP}$s p 和 q，TypeDecl(p, q) 认为 p 和 q 互为别名当且仅当 $Subtypes(Type(p)) \cap Subtypes(Type(q)) \ne \emptyset$ 。</p><p>举个例子：</p><pre tabindex=0><code>TYPE
+    T = OBJECT f, g: T; END;
+    S1 = T OBJECT ... END;
+    S2 = T OBJECT ... END;
+    S3 = T OBJECT ... END;
+VAR
+    t: T;
+    s: S1;
+    u: S2;
+</code></pre><p>因为 S1 和 S2 都是 T 的子类，所以 TypeDecl 认为 t 和 s 可能互为别名，t 和 u 可能互为别名：$Subtypes(Type(t)) \cap Subtypes(Type(s)) = {T, S1, S2, S3} \cap {S1} = {S1} \ne \emptyset$，$Subtypes(Type(t)) \cap Subtypes(Type(u)) = {T, S1, S2, S3} \cap {S2} = {S2} \ne \emptyset$ 。</p><p>但是 TypeDecl 认为 s 和 u 一定不会互为别名，因为 $Subtypes(Type(s)) \cap Subtypes(Type(u)) = {S1} \cap {S2} = \emptyset$ 。</p><h4 id=fieldtypedecl>FieldTypeDecl</h4><p>FieldTypeDecl TBAA 使用字段的类型声明和程序的其他高级信息（如某个字段、数组元素是否被执行过<strong>取地址</strong>操作）来改进 TypeDecl，使得 FieldTypeDecl 的别名分析比 TypeDecl 更精确。</p><p>和 TypeDecl 类似，给定两个 $\mathcal{AP}$s p 和 q，FieldTypeDecl(p, q) 返回 p 和 q 是否可能互为别名。FieldTypeDecl 的具体算法如下表所示：</p><table><thead><tr><th>Case</th><th>$\mathcal{AP}$ 1</th><th>$\mathcal{AP}$ 2</th><th>FieldTypeDecl($\mathcal{AP}$ 1, $\mathcal{AP}$ 2)</th></tr></thead><tbody><tr><td>1</td><td><code>p</code></td><td><code>p</code></td><td>$true$</td></tr><tr><td>2</td><td><code>p.f</code></td><td><code>q.g</code></td><td>$(f = g) \land FieldTypeDecl(p, q)$</td></tr><tr><td>3</td><td><code>p.f</code></td><td><code>q^</code></td><td>$AddressTaken(p.f) \land TypeDecl(p.f, q\hat{})$</td></tr><tr><td>4</td><td><code>p^</code></td><td><code>q[i]</code></td><td>$AddressTaken(q[i]) \land TypeDecl(p\hat{}, q[i])$</td></tr><tr><td>5</td><td><code>p.f</code></td><td><code>q[i]</code></td><td>$false$</td></tr><tr><td>6</td><td><code>p[i]</code></td><td><code>q[i]</code></td><td>$FieldTypeDecl(p, q)$</td></tr><tr><td>7</td><td><code>p</code></td><td><code>q</code></td><td>$TypeDecl(p, q)$</td></tr></tbody></table><p>$AddressTaken(p) = true$ 表示程序中曾经对 p 有过取地址的操作。例如 $AddressTaken(p.f) = true$ 说明程序中曾经对 TypeDecl(p) 类型的对象的 f 字段有过取地址操作；$AddressTaken(q[i]) = true$ 说明程序中曾经对数组 q 的某些元素有过取地址操作。</p><p>FieldTypeDecl 的别名分析比 TypeDecl 更精确，比如对于同一对象的不同字段 <code>t.f</code> 和 <code>t.g</code>，即使它们有着相同的类型，但是因为它们访问的是不同的字段，所以 FieldTypeDecl 会认为它们没有别名关系。</p><p>这里需要额外解释一下 case 5，在 Modula-3 编程语言中取数组下标的表达式一定不会和访问对象某个字段的表达书互为别名。</p><h4 id=smtyperefs>SMTypeRefs</h4><p>SMTypeRefs 即 Selectively Merge Type References，通过分析程序中的赋值语句 (assignments) 来更准确地实现别名分析。</p><p>给定一个 $\mathcal{AP}$ p，TypeDecl 非常保守地认为 p 可能访问所有与 Type(p) 有相同类型或子类型的对象。但是这样就有一个问题，考虑如下的代码：</p><pre tabindex=0><code>TYPE
+    T = OBJECT f, g: T; END;
+    S1 = T OBJECT ... END;
+    S2 = T OBJECT ... END;
+    S3 = T OBJECT ... END;
+VAR
+    t: T := NEW (T);
+    s: S1 := NEW (S1);
+</code></pre><p>对于上述代码，TypeDecl 认为 t 和 s 可能互为别名，但是显然 t 和 s 之间没有任何直接或间接的赋值语句使他们指向同一个内存对象，所以他们一定不会互为别名。SMTypeRefs 就是在 TypeDecl 的基础上通过分析程序中的赋值语句来提高别名分析的精确度。</p><p>SMTypeRefs 的算法伪代码如下图所示：</p><p><img src=/blog/strict_aliasing-tbaa-and-type_sanitizer/2022-11-14-09-30-04-image.png alt></p><p>给定两个 $\mathcal{AP}$s p 和 q，SMTypeRefs(p, q) 认为 p 和 q 互为别名当且仅当 $TypeRefsTable(Type(p)) \cap TypeRefsTable(Type(q)) \ne \emptyset$ 。</p><p>举个例子来解释 SMTypeRefs TBAA 算法：</p><pre tabindex=0><code>TYPE
+    T = OBJECT f, g: T; END;
+    S1 = T OBJECT ... END;
+    S2 = T OBJECT ... END;
+    S3 = T OBJECT ... END;
+VAR
+    s1: S1 := NEW (S1);
+    s2: S2 := NEW (S2);
+    s3: S3 := NEW (S3);
+    t: T
+BEGIN
+    t := s1; (* Statement 1*)
+    t := s2; (* Statement 2*)
+END
+</code></pre><ul><li><p>Step 1：初始化 Group 集合：{ {T}, {S1}, {S2}, {S3} }</p></li><li><p>Step 2：</p><ul><li><p>根据 <code>t := s1; (* Statement 1*)</code> 更新 Group：Type(t) = T, Type(s1) = S1, Ga = {T}, Gb = {S1}, Group = { {T}, {S1}, {S2}, {S3} } - {T} - {S1} + {T, S1} = { {T, S1}, {S2}, {S3} }</p></li><li><p>根据 <code>t := s2; (* Statement 2*)</code> 再更新 Group：Type(t) = T, Type(s2) = S2, Ga = {T, S1}, Gb = {S2}, Group = { {T, S1}, {S2}, {S3} } - {T, S1} - {S2} + {T, S1, S2} = { {T, S1, S2}, {S3} }</p></li></ul></li><li><p>Step 3：根据 Group 集合得到 TypeRefsTable 如下：</p><table><thead><tr><th>Type</th><th>TypeRefsTable(Type)</th></tr></thead><tbody><tr><td>T</td><td>T, S1, S2</td></tr><tr><td>S1</td><td>S1</td></tr><tr><td>S2</td><td>S2</td></tr><tr><td>S3</td><td>S3</td></tr></tbody></table></li></ul><p>所以根据 TypeRefsTable，可以得到：</p><ul><li><p>t 和 s1 可能互为别名，因为 $SMTypeRefs(t, s1) = TypeRefsTable(Type(t)) \cap TypeRefsTable(Type(s1)) = {T, S1, S2} \cap {S1} = {S1} \ne \emptyset$</p></li><li><p>t 和 s2 可能互为别名，因为 $SMTypeRefs(t, s2) = TypeRefsTable(Type(t)) \cap TypeRefsTable(Type(s2)) = {T, S1, S2} \cap {S2} = {S2} \ne \emptyset$</p></li><li><p>s1 和 s2 不可能互为别名，因为 $SMTypeRefs(s1, s2) = TypeRefsTable(Type(s1)) \cap TypeRefsTable(Type(s2)) = {S1} \cap {S2} = \emptyset$</p></li></ul><h3 id=implementation-in-llvm>Implementation in LLVM</h3><p>TBAA 在 LLVM 中是以一种称为 metadata-based TBAA 的方式实现的。因为在 LLVM IR 上，内存是没有类型的，所以直接基于 LLVM 的类型系统做 TBAA 不太合适。Metadata-based TBAA 指的是：基于 LLVM 的编译器（如 clang）在前端生成 LLVM IR 时会在指令上 attach 一些 metadata，这些 metadata 描述了高级语言的类型系统信息，LLVM 就是基于这些 metadata 来做 TBAA 分析的。</p><p>本节我们以如下代码为例说明 LLVM 中 TBAA 的实现：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>S1</span> { <span style=color:#66d9ef>int</span> i; <span style=color:#66d9ef>long</span> l; };
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>S2</span> { <span style=color:#66d9ef>float</span> f; <span style=color:#66d9ef>double</span> d; S1 s; };
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>foo</span>(S1 <span style=color:#f92672>*</span>p1, S2 <span style=color:#f92672>*</span>p2) {
+</span></span><span style=display:flex><span>  p1<span style=color:#f92672>-&gt;</span>i <span style=color:#f92672>=</span> <span style=color:#ae81ff>1</span>;
+</span></span><span style=display:flex><span>  p2<span style=color:#f92672>-&gt;</span>s.i <span style=color:#f92672>=</span> <span style=color:#ae81ff>2</span>;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> p1<span style=color:#f92672>-&gt;</span>i;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p><code>clang++ -O3 -S -emit-llvm struct-tbaa.cpp</code> 生成的 LLVM IR 如下：</p><pre tabindex=0><code>%struct.S1 = type { i32, i64 }
+%struct.S2 = type { float, double, %struct.S1 }
+
+define i32 @_Z3fooP2S1P2S2(ptr %p1, ptr %p2) {
+entry:
+  store i32 1, ptr %p1, align 8, !tbaa !5
+  %s = getelementptr inbounds %struct.S2, ptr %p2, i64 0, i32 2
+  store i32 2, ptr %s, align 8, !tbaa !11
+  %0 = load i32, ptr %p1, align 8, !tbaa !5
+  ret i32 %0
+}
+
+!5 = !{!6, !7, i64 0}
+!6 = !{!&#34;_ZTS2S1&#34;, !7, i64 0, !10, i64 8}
+!7 = !{!&#34;int&#34;, !8, i64 0}
+!8 = !{!&#34;omnipotent char&#34;, !9, i64 0}
+!9 = !{!&#34;Simple C++ TBAA&#34;}
+!10 = !{!&#34;long&#34;, !8, i64 0}
+!11 = !{!12, !7, i64 16}
+!12 = !{!&#34;_ZTS2S2&#34;, !13, i64 0, !14, i64 8, !6, i64 16}
+!13 = !{!&#34;float&#34;, !8, i64 0}
+!14 = !{!&#34;double&#34;, !8, i64 0}
+</code></pre><h4 id=tbaa-medata>TBAA medata</h4><p>首先学习下 TBAA metadata 是什么。在函数 <code>foo</code> 对应的 LLVM IR 中 load/store 指令之后都有形如 !tbaa !5 的内容，这就是 TBAA metadata。</p><p>TBAA metadata node 一共有三种：scalar type node, struct type node 和 path tag node。TBAA type node 之间会形成 DAG。</p><ul><li><p>scalar type node</p><p>下述 metadata node 都是 scalar type node。</p><pre tabindex=0><code>!7 = !{!&#34;int&#34;, !8, i64 0}
+!8 = !{!&#34;omnipotent char&#34;, !9, i64 0}
+!9 = !{!&#34;Simple C++ TBAA&#34;}
+!10 = !{!&#34;long&#34;, !8, i64 0}
+!13 = !{!&#34;float&#34;, !8, i64 0}
+!14 = !{!&#34;double&#34;, !8, i64 0}
+</code></pre><p>scalar type node 最多由三个字段组成：第一个字段通常是字符串，作为该 scalar type 的标识符；第二个字段表示该节点的父节点；第三个字段是一个常数，如果为 1 表示 <a href=https://llvm.org/doxygen/classllvm_1_1AAResults.html#a2017d417fc2e73c8bcc5acb6a0688016>pointsToConstantMemory</a> 返回 true。</p><p>例如 <code>!13 = !{!"float", !8, i64 0}</code> 该节点表示的类型是 float 类型，父节点是 <code>!8 = !{!"omnipotent char", !9, i64 0}</code>。</p><p><code>!8 = !{!"omnipotent char", !9, i64 0}</code> 表示的则是 char 类型，父节点是 <code>!9 = !{!"Simple C++ TBAA"}</code>。这里为什么要在 char 之前加个 omnipotent（万能的） ？还记得我们在 Strict Aliasing Rule 一章中提到的 C++ 标准么，标准中规定 char, unsigned char 或 std::byte 类型的指针能够合法访问任意其他类型的对象，所以这里用 &ldquo;omnipotent char&rdquo; 表示 char 类型可能与任意其他类型之间存在别名关系。（注：C++ 标准中说的是 char, unsigned char 并没有包括 signed char，C 标准则是 char, signed char 和 unsigned char 都包含了，这里 clang 在处理 C++ 时“不太标准”，<a href=https://github.com/llvm/llvm-project/blob/llvmorg-15.0.0/clang/lib/CodeGen/CodeGenTBAA.cpp#L121>为 signed char 也生成了 “omnipotent char” TBAA metadata node</a>）</p><p><code>!9 = !{!"Simple C++ TBAA"}</code> 就是根节点了，所以只有一个标识符字段。这里 &ldquo;Simple C++ TBAA&rdquo; 的作用主要是说明这部分 LLVM IR 是 C++ 代码生成的。不同的编译器前端比如 clang, rustc 在生成 TBAA metadata 时生成的根结点是不同的，LLVM 优化时会保守地认为两个根节点不同的 type node 存在别名关系。</p></li><li><p>struct type node</p><p>struct type node 由标识符和多个 pair 组成，struct 有多少个成员变量就有多少个 pair。pair 的第一个元素表示成员变量的类型，指向其他的 TBAA type node，pair 的第二个字段表示成员变量的偏移。</p><p>例如 struct S1 有 2 个成员变量，所以 <code>!6 = !{!"_ZTS2S1", !7, i64 0, !10, i64 8}</code> 由标识符和 2 个 pair 组成。<code>!7</code> 表示 struct S1 的第一个成员变量类型是 int，<code>i64 0</code> 表示 struct S1 的第一个成员变量的偏移是 0，<code>!10</code> 表示 struct S1 的第二个成员变量类型是 long，<code>i64 8</code> 表示 struct B 的第二个成员变量的偏移是 8。</p><p>struct S2 有 3 个成员变量，所以 <code>!12 = !{!"_ZTS2S2", !13, i64 0, !14, i64 8, !6, i64 16}</code> 由标识符和 3 个 pair 组成。<code>!13</code> 表示 struct S2 的第一个成员变量类型是 float，<code>i64 0</code> 表示 struct S2 的第一个成员变量的偏移是 0，<code>!14</code> 表示 struct S2 的第二个成员变量类型是 double，<code>i64 8</code> 表示 struct B 的第二个成员变量的偏移是 8，<code>!16</code> 表示 struct S2 的第三个成员变量类型是 struct S1，<code>i64 16</code> 表示 struct B 的第三个成员变量的偏移是 16。</p></li><li><p>path tag node</p><p>path tag node 用于标识一次 load/store，attach 到 的 load/store 指令后的 <code>!tbaa</code> 就是 TBAA path tag node。path tag node 由四个字段组成：第一个字段是 base type node，可以是 scalar type node 或 struct type node；第二个字段是 access type node，一定是 scalar type node；第三个字段是偏移；第四个字段是可选字段，与 scalar type node 的最后一个字段有着同样的意义，如果为 1 表示本次访问的是 <a href=https://llvm.org/doxygen/classllvm_1_1AAResults.html#a2017d417fc2e73c8bcc5acb6a0688016>pointsToConstantMemory</a>。</p><pre tabindex=0><code>p2-&gt;s.i = 2
+</code></pre><p>对应的 LLVM IR 就是：</p><pre tabindex=0><code>  %s = getelementptr inbounds %struct.S2, ptr %p2, i64 0, i32 2
+  store i32 2, ptr %s, align 8, !tbaa !11
+</code></pre><p><code>!11 = !{!12, !7, i64 16}</code> path tag node 表示的就是对 <code>S2.s.i</code> 的访问：</p><ul><li><p><code>!12</code> 表示 <code>S2.s.i</code> 访问的 base type 是 _ZTS2S2 即 struct S2</p></li><li><p><code>!7</code> 表示 <code>S2.s.i</code> 访问的 access type 是 int</p></li><li><p><code>i64 16</code> 表示 <code>S2.s.i</code> 访问的 i 相对 S2 的偏移是 16</p></li></ul></li></ul><h4 id=type-dag>Type DAG</h4><p>TBAA type node 之间构成了一个 type DAG。</p><ul><li><p>对于 scalar type node，DAG 中会有一条以该节点为起点，以其父节点为终点的边。例如：</p><pre tabindex=0><code>!7 = !{!&#34;int&#34;, !8, i64 0}
+!8 = !{!&#34;omnipotent char&#34;, !9, i64 0}
+</code></pre><p>在 DAG 中就存在一条由 int 节点指向 omnipotent char 节点的边。</p></li><li><p>对于 struct type node，DAG 中会有以该节点为起点，以其成员变量类型节点为终点的边。例如：</p><pre tabindex=0><code>!6 = !{!&#34;_ZTS2S1&#34;, !7, i64 0, !10, i64 8}
+!7 = !{!&#34;int&#34;, !8, i64 0}
+!10 = !{!&#34;long&#34;, !8, i64 0}
+</code></pre><p>在 DAG 中有两条以 struct S1 为起点的边，终点分别为节点 int 和节点 long。</p></li></ul><p>回到本节最开始我们给出的例子：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>S1</span> { <span style=color:#66d9ef>int</span> i; <span style=color:#66d9ef>long</span> l; };
+</span></span><span style=display:flex><span><span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>S2</span> { <span style=color:#66d9ef>float</span> f; <span style=color:#66d9ef>double</span> d; S1 s; };
+</span></span></code></pre></div><p>对应的 type DAG 如下图所示：</p><p><img src=/blog/strict_aliasing-tbaa-and-type_sanitizer/2022-11-21-10-43-30-image.png alt></p><h4 id=check-alias>Check Alias</h4><p>现在我们已经知道了 LLVM IR 上的 TBAA metadata 保存了哪些信息，下面我们看下 LLVM 是如何根据这些 TBAA metadata 信息判断两个内存访问之间是否存在别名关系的。</p><p>LLVM <a href=https://github.com/llvm/llvm-project/blob/llvmorg-15.0.0/llvm/lib/Analysis/TypeBasedAliasAnalysis.cpp#L91>TBAA 源码</a>中的注释其实将怎样判断两次内存访问是否存在别名关系说明非常清楚了：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#75715e>// To check if two tags (tagX and tagY) can alias, we start from the base type
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// of tagX, follow the edge with the correct offset in the type DAG and adjust
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// the offset until we reach the base type of tagY or until we reach the Root
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// node.
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// If we reach the base type of tagY, compare the adjusted offset with
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// offset of tagY, return Alias if the offsets are the same, return NoAlias
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// otherwise.
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// If we reach the Root node, perform the above starting from base type of tagY
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// to see if we reach base type of tagX.
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// If they have different roots, they&#39;re part of different potentially
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// unrelated type systems, so we return Alias to be conservative.
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// If neither node is an ancestor of the other and they have the same root,
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// then we say NoAlias.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#66d9ef>bool</span> <span style=color:#a6e22e>TypeBasedAliasAnalysis</span>(PathTagNodeX, PathTagNodeY){
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>if</span> (PathTagNodeX <span style=color:#f92672>==</span> PathTagNodeY)
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span> true;
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// Accesses with no TBAA information may alias with any other accesses.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>PathTagNodeX <span style=color:#f92672>||</span> <span style=color:#f92672>!</span>PathTagNodeY)
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span> true;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    CommonType <span style=color:#f92672>=</span> getLeastCommonType(PathTagNodeX.getAccessType(),
+</span></span><span style=display:flex><span>                                    PathTagNodeY.getAccessType());
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// If the access types have different roots, they&#39;re part of different
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// potentially unrelated type systems, so we must be conservative.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>CommonType)
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span> true;
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// If one of the accessed objects may be a subobject of the other,
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// then such accesses may alias.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#66d9ef>bool</span> MayAlias;
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>if</span> (mayBeAccessToSubobjectOf(<span style=color:#75715e>/* BaseTag= */</span> PathTagNodeX,
+</span></span><span style=display:flex><span>                                 <span style=color:#75715e>/* SubobjectTag= */</span> PathTagNodeY,
+</span></span><span style=display:flex><span>                                 CommonType, MayAlias) <span style=color:#f92672>||</span>
+</span></span><span style=display:flex><span>        mayBeAccessToSubobjectOf(<span style=color:#75715e>/* BaseTag= */</span> PathTagNodeY,
+</span></span><span style=display:flex><span>                                 <span style=color:#75715e>/* SubobjectTag= */</span> PathTagNodeX,
+</span></span><span style=display:flex><span>                                 CommonType, MayAlias))
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span> MayAlias;
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>return</span> false;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#75715e>// Return true if for two given accesses, one of the accessed objects may be
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// a subobject of the other. The \p BaseTag and \p SubobjectTag parameters
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// describe the accesses to the base object and the subobject respectively.
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// \p CommonType must be the metadata node describing the common type of the
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// accessed objects. On return, \p MayAlias is set to true iff these accesses
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// may alias.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#66d9ef>bool</span> <span style=color:#a6e22e>mayBeAccessToSubobjectOf</span>(TBAAStructTagNode BaseTag,
+</span></span><span style=display:flex><span>                              TBAAStructTagNode SubobjectTag,
+</span></span><span style=display:flex><span>                              <span style=color:#66d9ef>const</span> MDNode <span style=color:#f92672>*</span>CommonType,
+</span></span><span style=display:flex><span>                              <span style=color:#66d9ef>bool</span> <span style=color:#f92672>&amp;</span>MayAlias) {
+</span></span><span style=display:flex><span>  <span style=color:#75715e>// If the base object is of the least common type, then this may be an access
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  <span style=color:#75715e>// to its subobject.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  <span style=color:#66d9ef>if</span> (BaseTag.getAccessType() <span style=color:#f92672>==</span> BaseTag.getBaseType() <span style=color:#f92672>&amp;&amp;</span>
+</span></span><span style=display:flex><span>      BaseTag.getAccessType() <span style=color:#f92672>==</span> CommonType) {
+</span></span><span style=display:flex><span>    MayAlias <span style=color:#f92672>=</span> true;
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>return</span> true;
+</span></span><span style=display:flex><span>  }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>  <span style=color:#75715e>// If the access to the base object is through a field of the subobject&#39;s
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  <span style=color:#75715e>// type, then this may be an access to that field. To check for that we start
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  <span style=color:#75715e>// from the base type, follow the edge with the correct offset in the type DAG
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  <span style=color:#75715e>// and adjust the offset until we reach the field type or until we reach the
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  <span style=color:#75715e>// access type.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  TBAAStructTypeNode BaseType(BaseTag.getBaseType());
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>uint64_t</span> OffsetInBase <span style=color:#f92672>=</span> BaseTag.getOffset();
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>for</span> (;;) {
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// In the old format there is no distinction between fields and parent
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// types, so in this case we consider all nodes up to the root.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>BaseType.getNode()) {
+</span></span><span style=display:flex><span>      assert(<span style=color:#f92672>!</span>NewFormat <span style=color:#f92672>&amp;&amp;</span> <span style=color:#e6db74>&#34;Did not see access type in access path!&#34;</span>);
+</span></span><span style=display:flex><span>      <span style=color:#66d9ef>break</span>;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>if</span> (BaseType.getNode() <span style=color:#f92672>==</span> SubobjectTag.getBaseType()) {
+</span></span><span style=display:flex><span>      <span style=color:#66d9ef>bool</span> SameMemberAccess <span style=color:#f92672>=</span> OffsetInBase <span style=color:#f92672>==</span> SubobjectTag.getOffset();
+</span></span><span style=display:flex><span>      MayAlias <span style=color:#f92672>=</span> SameMemberAccess;
+</span></span><span style=display:flex><span>      <span style=color:#66d9ef>return</span> true;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// Follow the edge with the correct offset. Offset will be adjusted to
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// be relative to the field type.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    BaseType <span style=color:#f92672>=</span> BaseType.getField(OffsetInBase);
+</span></span><span style=display:flex><span>  }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> false;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>我们还是通过例子来学习：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>foo</span>(S1 <span style=color:#f92672>*</span>p1, S2 <span style=color:#f92672>*</span>p2) {
+</span></span><span style=display:flex><span>  p1<span style=color:#f92672>-&gt;</span>i <span style=color:#f92672>=</span> <span style=color:#ae81ff>1</span>;
+</span></span><span style=display:flex><span>  p2<span style=color:#f92672>-&gt;</span>s.i <span style=color:#f92672>=</span> <span style=color:#ae81ff>2</span>;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> p1<span style=color:#f92672>-&gt;</span>i;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><pre tabindex=0><code>define i32 @_Z3fooP2S1P2S2(ptr %p1, ptr %p2) {
+entry:
+  store i32 1, ptr %p1, align 8, !tbaa !5
+  %s = getelementptr inbounds %struct.S2, ptr %p2, i64 0, i32 2
+  store i32 2, ptr %s, align 8, !tbaa !11
+  %0 = load i32, ptr %p1, align 8, !tbaa !5
+  ret i32 %0
+}
+</code></pre><p>编译器之所以没有将 foo 函数的返回值直接优化为 <code>return 1</code> 是因为编译器发现 <code>p2->s.i</code> 和 <code>p1->i</code> 访问的可能是内存中的同一对象，即存在别名关系。也就是说 <code>p2->s.i = 2</code> 这一赋值语句可能会修改 <code>p1->i</code> 的值，所以不能将 foo 函数的返回值直接优化为 1，而是需要重新从内存中读取 <code>p1->i</code> 的值作为返回值。</p><p>判断 <code>p2->s.i</code> 和 <code>p1->i</code> 之间是否有别名关系：</p><ul><li><p><code>p2->s.i = 2</code> 对应的 LLVM IR 指令是 <code>store i32 2, ptr %s, align 8, !tbaa !11</code></p></li><li><p><code>p1->i = 1</code> 对应的 LLVM IR 指令是 <code>store i32 1, ptr %p1, align 8, !tbaa !5</code></p></li></ul><p>详细的 TBAA 算法流程如下：</p><ol><li><p>两个输入 PathTagNode 分别是 <code>!11 = !{!12, !7, i64 16}</code> 和 <code>!5 = !{!6, !7, i64 0}</code>。<code>!11</code> 的 BaseType 是 <code>!12</code> 即 struct S2，AccessType 是 <code>!7</code> 即 int，Offset 是 16；<code>!5</code> 的 BaseType 是 <code>!6</code> 即 struct S1，AccessType 是 <code>!7</code> 即 int，Offset 是 0。显然 <code>!11</code> 和 <code>!5</code> 都不为空，并且是不同的 PathTagNode，所以继续执行。</p></li><li><p>因为 <code>!11</code> 的 AccessType 就是 <code>!7</code> 即 int 类型，<code>!5</code> 的 AccessType 也是 <code>!7</code>即 int 类型，所以 LeastCommonType 就是 int 类型</p></li><li><p><code>!11</code> 的 BaseType 是 <code>!12</code> 即 struct S2，AccessType 是 <code>!7</code> 即 int，Offset 是 16。根据 <code>!12 = !{!"_ZTS2S2", !13, i64 0, !14, i64 8, !6, i64 16}</code> 可知 struct S2 第三个成员变量的类型是 struct S1 且偏移就是 16。所以 PathTagNode <code>!11</code> 可以转换为新的 PathTagNode：BaseType 变为 struct S1，AccessType 不变还是 int，Offset 变为 <code>16 - 16 = 0</code>，即 <code>!11 = !{!12, !7, i64 16} = !{!6, !7, i64 0}</code>。此时发现 <code>!11</code> 和 <code>!5</code> 实际上访问的是同一 BaseType(<code>!6</code> 即 struct S1) 的同一 Offset 0，所以就认为 <code>!11</code> 和 <code>!5</code> 可能存在别名关系，即 <code>p2->s.i</code> 和 <code>p1->i</code> 访问的可能是内存中的同一对象！</p></li></ol><h2 id=typesanitizer>TypeSanitizer</h2><p>TypeSanitizer(AKA TySan) 最早由 Hal Finkel 在 2017 年提出 <a href=https://lists.llvm.org/pipermail/llvm-dev/2017-April/112189.html>RFC</a>，并且在 2017 LLVM Developers’ Meeting 做了<a href="https://www.youtube.com/watch?v=vAXJeN7k32Y">分享</a>。但是截止本文撰写时，TypeSanitizer 的实现还没有被合入社区。最近 Florian Hahn 在 discourse 上发帖希望能 <a href=https://discourse.llvm.org/t/reviving-typesanitizer-a-sanitizer-to-catch-type-based-aliasing-violations/66092>Reviving TypeSanitizer</a>，我也做了一点微小的工作，解决了 TypeSanitizer 在 Linux 下的编译和测试问题，希望后面也能帮忙推进 TypeSanitizer 的发展。</p><p>TypeSanitizer 和其他 Sanitizer 如 AddressSanitizer, ThreadSanitizer 一样都是动态分析，TypeSanitizer 用于检测程序中的 type-based aliasing violations。通常 Sanitizer 由三部分组成：shadow mapping, compile-time instrumentation 和 runtime library。所以下面我们从这三个方面展开来介绍 TypeSanitizer 的原理。</p><p>在本节，我们使用如下代码为例说明 TypeSanitizer 的原理：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#75715e>// clang++ -O3 -S -emit-llvm int-long.cpp
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;cstdio&gt;</span><span style=color:#75715e>
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>long</span> <span style=color:#a6e22e>foo</span>(<span style=color:#66d9ef>int</span> <span style=color:#f92672>*</span>x, <span style=color:#66d9ef>long</span> <span style=color:#f92672>*</span>y) {
+</span></span><span style=display:flex><span>  <span style=color:#f92672>*</span>y <span style=color:#f92672>=</span> <span style=color:#ae81ff>1</span>;
+</span></span><span style=display:flex><span>  <span style=color:#f92672>*</span>x <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> <span style=color:#f92672>*</span>y;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>[[clang::optnone]]</span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> main(<span style=color:#66d9ef>void</span>) {
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>long</span> l;
+</span></span><span style=display:flex><span>  printf(<span style=color:#e6db74>&#34;%ld</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, foo((<span style=color:#66d9ef>int</span> <span style=color:#f92672>*</span>)<span style=color:#f92672>&amp;</span>l<span style=color:#f92672>+</span><span style=color:#ae81ff>1</span>, <span style=color:#f92672>&amp;</span>l));
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p><code>foo</code> 函数对应的 LLVM IR 如下：</p><pre tabindex=0><code>define i64 @_Z3fooPiPl(ptr %x, ptr %y) {
+entry:
+  store i64 1, ptr %y, align 8, !tbaa !5
+  store i32 0, ptr %x, align 4, !tbaa !9
+  ret i64 0
+}
+
+!5 = !{!6, !6, i64 0}
+!6 = !{!&#34;long&#34;, !7, i64 0}
+!7 = !{!&#34;omnipotent char&#34;, !8, i64 0}
+!8 = !{!&#34;Simple C++ TBAA&#34;}
+!9 = !{!10, !10, i64 0}
+!10 = !{!&#34;int&#34;, !7, i64 0}
+</code></pre><h3 id=shadow-mapping>Shadow Mapping</h3><p>Sanitizer 广泛使用了 shadow memory 技术，通过使用额外的内存来记录常规内存的状态。</p><p>例如 ASan 对于每 8-bytes 的 application memory 都使用 1-byte shadow memory 来标识对这 8-bytes application memory 的访问是否合法。</p><p>TySan 的 shadow mapping 与 ASan 有所不同，TySan 对于每 1-byte 的 application memory 都使用 <code>sizeof(void*)</code> bytes 的 shadow memory 来记录这 1-byte 的类型信息。TySan 的 shadow mapping 计算公式如下：</p><pre tabindex=0><code>MemToShadow(addr) = (addr &amp; SHADOW_MASK) * sizeof(void*) + SHADOW_OFFSET
+</code></pre><p><code>sizeof (void*)</code> 就是计算指针的大小，在 64 位环境下就是 64 bit，即 8-bytes。那么 TySan 的 shadow mapping 为什么设计成这样呢？这是因为 TySan 的 shadow memory 中存储的是指针，所以每 1-byte application memory 都要对应指针大小的 shadow memory。</p><p>64 位环境下 4-bytes application memory 对应的 32-bytes shadow memory 的布局如下：</p><pre tabindex=0><code>+-----------------+-----------------+-----------------+-----------------+
+|Access Descriptor|       -1        |        -2       |        -3       |
++-----------------+-----------------+-----------------+-----------------+
+</code></pre><p>前 8-bytes 存储的是指向 Access Descriptor 的指针，后面 8-bytes 的内容依次是 -1, -2, -3 &mldr;</p><h3 id=instrumentation>Instrumentation</h3><p>在编译时启用 TypeSanitizer 后，不管程序的优化等级是多少、不管是否添加了 <code>-fno-strict-aliasing</code> 编译选项，clang 都会在生成的 LLVM IR 上添加 TBAA metadata。</p><p>TypeSanitizer 编译时插桩主要做两个事情：generateTypeDescriptor 和 instrumentMemoryAccess。</p><h4 id=generatetypedescriptor>generateTypeDescriptor</h4><p>generateTypeDescriptor 就是将 TBAA metadata 转变为程序中的全局变量，TypeSanitizer 将这样的全局变量称作 TypeDescriptor。这样在程序运行时就可以根据这些 TBAA metadata/TypeDescriptor 判断内存访问时是否发生了 type-based aliasing violations。</p><p>TypeDescriptor 的定义如下：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>enum</span> { TYSAN_MEMBER_TD <span style=color:#f92672>=</span> <span style=color:#ae81ff>1</span>, TYSAN_STRUCT_TD <span style=color:#f92672>=</span> <span style=color:#ae81ff>2</span> };
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>tysan_type_descriptor</span> {
+</span></span><span style=display:flex><span>  uptr Tag; <span style=color:#75715e>// 1 for member_type_descriptor, 2 for struct_type_descriptor
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  <span style=color:#66d9ef>union</span> {
+</span></span><span style=display:flex><span>    tysan_member_type_descriptor Member;
+</span></span><span style=display:flex><span>    tysan_struct_type_descriptor Struct;
+</span></span><span style=display:flex><span>  };
+</span></span><span style=display:flex><span>};
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>tysan_member_type_descriptor</span> {
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>tysan_type_descriptor</span> <span style=color:#f92672>*</span>Base;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>tysan_type_descriptor</span> <span style=color:#f92672>*</span>Access;
+</span></span><span style=display:flex><span>  uptr Offset;
+</span></span><span style=display:flex><span>};
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>tysan_struct_type_descriptor</span> {
+</span></span><span style=display:flex><span>  uptr MemberCount;
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>struct</span> {
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>struct</span> <span style=color:#a6e22e>tysan_type_descriptor</span> <span style=color:#f92672>*</span>Type;
+</span></span><span style=display:flex><span>    uptr Offset;
+</span></span><span style=display:flex><span>  } Members[<span style=color:#ae81ff>1</span>]; <span style=color:#75715e>// Tail allocated.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  <span style=color:#75715e>// char Name[]; // Tail allocated.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>};
+</span></span></code></pre></div><ul><li><p>TBAA metadata 中的 path tag node 使用 tysan_member_type_descriptor 来表示</p></li><li><p>TBAA metadata 中的 scalar type node 和 struct type node 使用 tysan_struct_type_descriptor 来表示</p></li></ul><p>回到本节我们使用的例子，例子中的 TBAA metadata 如下：</p><pre tabindex=0><code>define i64 @_Z3fooPiPl(ptr %x, ptr %y) {
+entry:
+  store i64 1, ptr %y, align 8, !tbaa !5
+  store i32 0, ptr %x, align 4, !tbaa !9
+  ret i64 0
+}
+
+!5 = !{!6, !6, i64 0}
+!6 = !{!&#34;long&#34;, !7, i64 0}
+!7 = !{!&#34;omnipotent char&#34;, !8, i64 0}
+!8 = !{!&#34;Simple C++ TBAA&#34;}
+!9 = !{!10, !10, i64 0}
+!10 = !{!&#34;int&#34;, !7, i64 0}
+</code></pre><p>对应的生成的 TypeDescriptor 如下：</p><pre tabindex=0><code>; !5 = !{!6, !6, i64 0} 对应 @__tysan_v1_long_o_0
+@__tysan_v1_long_o_0 = linkonce_odr constant
+{ i64, ptr, ptr, i64 }
+{ i64 1, ptr @__tysan_v1_long, ptr @__tysan_v1_long, i64 0 }, comdat
+
+; !6 = !{!&#34;long&#34;, !7, i64 0} 对应 @__tysan_v1_long
+@__tysan_v1_long = linkonce_odr constant
+{ i64, i64, ptr, i64, [5 x i8] }
+{ i64 2, i64 1, ptr @__tysan_v1_omnipotent_20char, i64 0, [5 x i8] c&#34;long\00&#34; }, comdat
+
+; !7 = !{!&#34;omnipotent char&#34;, !8, i64 0} 对应 @__tysan_v1_omnipotent_20char
+@__tysan_v1_omnipotent_20char = linkonce_odr constant
+{ i64, i64, ptr, i64, [16 x i8] }
+{ i64 2, i64 1, ptr @__tysan_v1_Simple_20C_2b_2b_20TBAA, i64 0, [16 x i8] c&#34;omnipotent char\00&#34; }, comdat
+
+; !8 = !{!&#34;Simple C++ TBAA&#34;} 对应 @__tysan_v1_Simple_20C_2b_2b_20TBAA
+@__tysan_v1_Simple_20C_2b_2b_20TBAA = linkonce_odr constant
+{ i64, i64, [16 x i8] }
+{ i64 2, i64 0, [16 x i8] c&#34;Simple C++ TBAA\00&#34; }, comdat
+
+; !9 = !{!10, !10, i64 0} 对应 @__tysan_v1_int_o_0
+@__tysan_v1_int_o_0 = linkonce_odr constant
+{ i64, ptr, ptr, i64 }
+{ i64 1, ptr @__tysan_v1_int, ptr @__tysan_v1_int, i64 0 }, comdat
+
+; !10 = !{!&#34;int&#34;, !7, i64 0} 对应 @__tysan_v1_int
+@__tysan_v1_int = linkonce_odr constant
+{ i64, i64, ptr, i64, [4 x i8] }
+{ i64 2, i64 1, ptr @__tysan_v1_omnipotent_20char, i64 0, [4 x i8] c&#34;int\00&#34; }, comdat
+</code></pre><p>注意到，因为 TypeDescriptor 是根据 TBAA metadata 生成的，所以实际上这些 TypeDescriptor 是常量，在编译时确定，并且在运行中不会修改。</p><h4 id=instrumentmemoryaccess>instrumentMemoryAccess</h4><p>开启 TypeSanitizer 后， LLVM IR 的 load/store 指令会被添加 TBAA metadata。TypeSanitizer 会对这些 load/store 指令插桩代码，在运行时检测是否存在 type-based aliasing violations。插桩的代码就是函数 <code>__tysan_access_callback</code> 中的代码。</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>instrumentMemoryAccess</span>(Instruction <span style=color:#f92672>*</span>I) {
+</span></span><span style=display:flex><span>    MemoryLocation ML <span style=color:#f92672>=</span> MemoryLocation<span style=color:#f92672>::</span>get(I);
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>Ptr <span style=color:#f92672>=</span> ML.Ptr;
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>uint64_t</span> AccessSize <span style=color:#f92672>=</span> ML.Size.getValue();
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>TypeDescriptorFromMetadata <span style=color:#f92672>=</span> TypeDescriptor(MLoc.AATags.TBAA);
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// __tysan_access_callback is inserted by compiler instrumentation
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    __tysan_access_callback(Ptr, AccessSize, TypeDescriptorFromMetadata);
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>__tysan_access_callback</span>(<span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>Ptr,
+</span></span><span style=display:flex><span>                             <span style=color:#66d9ef>uint64_t</span> AccessSize,
+</span></span><span style=display:flex><span>                             <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>TypeDescriptorFromMetadata) {
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>ShadowData <span style=color:#f92672>=</span> MemToShadow(Ptr);
+</span></span><span style=display:flex><span>    tysan_type_descriptor <span style=color:#f92672>*</span>TypeDescriptorFromShadowMemory <span style=color:#f92672>=</span> ShadowData[<span style=color:#ae81ff>0</span>];
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>if</span> (TypeDescriptorFromShadowMemory <span style=color:#f92672>!=</span> TypeDescriptorFromMetadata) {
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (TypeDescriptorFromShadowMemory <span style=color:#f92672>==</span> <span style=color:#ae81ff>0</span> <span style=color:#75715e>/* unknown */</span>){
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>bool</span> NotAllUnknownTypeDescriptor <span style=color:#f92672>=</span> false;
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>for</span> (<span style=color:#66d9ef>uint64_t</span> i <span style=color:#f92672>=</span> <span style=color:#ae81ff>1</span>; i <span style=color:#f92672>&lt;</span> AccessSize; <span style=color:#f92672>++</span>i)
+</span></span><span style=display:flex><span>                NotAllUnkTD <span style=color:#f92672>|=</span> (ShadowData[i] <span style=color:#f92672>!=</span> <span style=color:#ae81ff>0</span> <span style=color:#75715e>/* unknown */</span>)
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>if</span> (NotAllUnknownTypeDescriptor)
+</span></span><span style=display:flex><span>                __tysan_check(Ptr, AccessSize, TypeDescriptorFromMetadata);
+</span></span><span style=display:flex><span>            __tysan_set(Ptr, AccessSize, TypeDescriptorFromMetadata);
+</span></span><span style=display:flex><span>        } <span style=color:#66d9ef>else</span> {
+</span></span><span style=display:flex><span>            __tysan_check(Ptr, AccessSize, TypeDescriptorFromMetadata);
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>    } <span style=color:#66d9ef>else</span> {
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>bool</span> NotAllBadTypeDescriptor <span style=color:#f92672>=</span> false;
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>for</span> (<span style=color:#66d9ef>uint64_t</span> i <span style=color:#f92672>=</span> <span style=color:#ae81ff>1</span>; i <span style=color:#f92672>&lt;</span> AccessSize; <span style=color:#f92672>++</span>i)
+</span></span><span style=display:flex><span>            NotAllBadTypeDescriptor <span style=color:#f92672>|=</span> (ShadowData[i] <span style=color:#f92672>&gt;=</span> <span style=color:#ae81ff>0</span>)
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (NotAllBadTypeDescriptor)
+</span></span><span style=display:flex><span>            __tysan_check(Ptr, AccessSize, TypeDescriptorFromMetadata);
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><h3 id=runtime-library>Runtime Library</h3><p><code>__tysan_access_callback</code> 中调用的 <code>__tysan_check</code> 函数是在 runtime library 中实现的。</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>__tysan_check</span>(<span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>Ptr,
+</span></span><span style=display:flex><span>                   <span style=color:#66d9ef>uint64_t</span> AccessSize,
+</span></span><span style=display:flex><span>                   <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>TypeDescriptorFromMetadata) {
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>void</span> <span style=color:#f92672>**</span>ShadowData <span style=color:#f92672>=</span> MemToShadow(Ptr);
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>TypeDescriptorFromShadowMemory <span style=color:#f92672>=</span> ShadowData[<span style=color:#ae81ff>0</span>];
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>if</span> ((sptr)TypeDescriptorFromShadowMemory <span style=color:#f92672>&lt;</span> <span style=color:#ae81ff>0</span>) {
+</span></span><span style=display:flex><span>        sptr Offset <span style=color:#f92672>=</span> <span style=color:#f92672>-</span>((sptr)TypeDescriptorFromShadowMemory);
+</span></span><span style=display:flex><span>        ShadowData <span style=color:#f92672>-=</span> Offset;
+</span></span><span style=display:flex><span>        TypeDescriptorFromShadowMemory <span style=color:#f92672>=</span> <span style=color:#f92672>*</span>ShadowData;
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>isAliasingLegal(TypeDescriptorFromMetadata,
+</span></span><span style=display:flex><span>                             TypeDescriptorFromShadowMemory))
+</span></span><span style=display:flex><span>            reportError();
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span>;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>isAliasingLegal(TypeDescriptorFromMetadata,
+</span></span><span style=display:flex><span>                         TypeDescriptorFromShadowMemory)) {
+</span></span><span style=display:flex><span>        reportError();
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span>;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>for</span> (<span style=color:#66d9ef>uint64_t</span> i <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>; i <span style=color:#f92672>&lt;</span> AccessSize; <span style=color:#f92672>++</span>i) {
+</span></span><span style=display:flex><span>        TypeDescriptorFromShadowMemory <span style=color:#f92672>=</span> ShadowData[i];
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (((sptr)TypeDescriptorFromShadowMemory) <span style=color:#f92672>&gt;=</span> <span style=color:#ae81ff>0</span> <span style=color:#f92672>&amp;&amp;</span>
+</span></span><span style=display:flex><span>            <span style=color:#f92672>!</span>isAliasingLegal(TypeDescriptorFromMetadata,
+</span></span><span style=display:flex><span>                             TypeDescriptorFromShadowMemory))
+</span></span><span style=display:flex><span>            reportError();
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>__tysan_set</span>(<span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>Ptr,
+</span></span><span style=display:flex><span>                 <span style=color:#66d9ef>uint64_t</span> AccessSize,
+</span></span><span style=display:flex><span>                 <span style=color:#66d9ef>void</span> <span style=color:#f92672>*</span>TypeDescriptorFromMetadata) {
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>void</span> <span style=color:#f92672>**</span>ShadowData <span style=color:#f92672>=</span> MemToShadow(Ptr);
+</span></span><span style=display:flex><span>    ShadowData[<span style=color:#ae81ff>0</span>] <span style=color:#f92672>=</span> TypeDescriptorFromMetadata;
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>for</span> (<span style=color:#66d9ef>uint64_t</span> i <span style=color:#f92672>=</span> <span style=color:#ae81ff>1</span>; i <span style=color:#f92672>&lt;</span> AccessSize; <span style=color:#f92672>++</span>i) {
+</span></span><span style=display:flex><span>        ShadowData[i] <span style=color:#f92672>=</span> <span style=color:#f92672>-</span>i;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p><code>__tysan_check</code> 中判断是否存在 type-based aliasing violations 的核心是函数 <code>isAliasingLegal</code>：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>static</span> <span style=color:#66d9ef>bool</span> <span style=color:#a6e22e>isAliasingLegal</span>(tysan_type_descriptor <span style=color:#f92672>*</span>TDA,
+</span></span><span style=display:flex><span>                            tysan_type_descriptor <span style=color:#f92672>*</span>TDB) {
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>if</span> (TDA <span style=color:#f92672>==</span> TDB <span style=color:#f92672>||</span> <span style=color:#f92672>!</span>TDB <span style=color:#f92672>||</span> <span style=color:#f92672>!</span>TDA)
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span> true;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// Aliasing is legal is the two types have different root nodes.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#66d9ef>if</span> (getRootTD(TDA) <span style=color:#f92672>!=</span> getRootTD(TDB))
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span> true;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>return</span> isAliasingLegalUp(TDA, TDB) <span style=color:#f92672>||</span> isAliasingLegalUp(TDB, TDA);
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>static</span> <span style=color:#66d9ef>bool</span> <span style=color:#a6e22e>isAliasingLegalUp</span>(tysan_type_descriptor <span style=color:#f92672>*</span>TDA,
+</span></span><span style=display:flex><span>                              tysan_type_descriptor <span style=color:#f92672>*</span>TDB) {
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// Walk up the tree starting with TDA to see if we reach TDB.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    uptr OffsetA <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>, OffsetB <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>;
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>if</span> (TDB<span style=color:#f92672>-&gt;</span>Tag <span style=color:#f92672>==</span> TYSAN_MEMBER_TD) {
+</span></span><span style=display:flex><span>        OffsetB <span style=color:#f92672>=</span> TDB<span style=color:#f92672>-&gt;</span>Member.Offset;
+</span></span><span style=display:flex><span>        TDB <span style=color:#f92672>=</span> TDB<span style=color:#f92672>-&gt;</span>Member.Base;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>if</span> (TDA<span style=color:#f92672>-&gt;</span>Tag <span style=color:#f92672>==</span> TYSAN_MEMBER_TD) {
+</span></span><span style=display:flex><span>        OffsetA <span style=color:#f92672>=</span> TDA<span style=color:#f92672>-&gt;</span>Member.Offset;
+</span></span><span style=display:flex><span>        TDA <span style=color:#f92672>=</span> TDA<span style=color:#f92672>-&gt;</span>Member.Base;
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>do</span> {
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (TDA <span style=color:#f92672>==</span> TDB)
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> OffsetA <span style=color:#f92672>==</span> OffsetB;
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (TDA<span style=color:#f92672>-&gt;</span>Tag <span style=color:#f92672>==</span> TYSAN_STRUCT_TD) {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>TDA<span style=color:#f92672>-&gt;</span>Struct.MemberCount)
+</span></span><span style=display:flex><span>                <span style=color:#66d9ef>break</span>;
+</span></span><span style=display:flex><span>            uptr Idx <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>;
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>for</span> (; Idx <span style=color:#f92672>&lt;</span> TDA<span style=color:#f92672>-&gt;</span>Struct.MemberCount <span style=color:#f92672>-</span> <span style=color:#ae81ff>1</span>; <span style=color:#f92672>++</span>Idx) {
+</span></span><span style=display:flex><span>                <span style=color:#66d9ef>if</span> (TDA<span style=color:#f92672>-&gt;</span>Struct.Members[Idx].Offset <span style=color:#f92672>&gt;=</span> OffsetA)
+</span></span><span style=display:flex><span>                    <span style=color:#66d9ef>break</span>;
+</span></span><span style=display:flex><span>            }
+</span></span><span style=display:flex><span>            OffsetA <span style=color:#f92672>-=</span> TDA<span style=color:#f92672>-&gt;</span>Struct.Members[Idx].Offset;
+</span></span><span style=display:flex><span>            TDA <span style=color:#f92672>=</span> TDA<span style=color:#f92672>-&gt;</span>Struct.Members[Idx].Type;
+</span></span><span style=display:flex><span>        } <span style=color:#66d9ef>else</span> {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>break</span>;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>    } <span style=color:#66d9ef>while</span> (TDA);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>return</span> false;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>如果你对照 LLVM TBAA 中 <code>TypeBasedAliasAnalysis()</code> 函数的实现和 TypeSanitizer 这里 <code>isAliasingLegal</code> 你会发现算法几乎是一模一样的！不得不说，TypeSanitizer 算法设计的很精妙！</p><h3 id=case-study>Case Study</h3><p>最后，我们通过本节最开始的例子，说明 TypeSanitizer 是如何检测出 type-based aliasing violations 的。</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#75715e>// clang++ -O3 -S -emit-llvm int-long.cpp
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#75715e>#include</span> <span style=color:#75715e>&lt;cstdio&gt;</span><span style=color:#75715e>
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>long</span> <span style=color:#a6e22e>foo</span>(<span style=color:#66d9ef>int</span> <span style=color:#f92672>*</span>x, <span style=color:#66d9ef>long</span> <span style=color:#f92672>*</span>y) {
+</span></span><span style=display:flex><span>  <span style=color:#f92672>*</span>y <span style=color:#f92672>=</span> <span style=color:#ae81ff>1</span>; <span style=color:#75715e>// !5
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  <span style=color:#f92672>*</span>x <span style=color:#f92672>=</span> <span style=color:#ae81ff>0</span>; <span style=color:#75715e>// !9
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>  <span style=color:#66d9ef>return</span> <span style=color:#f92672>*</span>y;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>[[clang::optnone]]</span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> main(<span style=color:#66d9ef>void</span>) {
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>long</span> l;
+</span></span><span style=display:flex><span>  printf(<span style=color:#e6db74>&#34;%ld</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, foo((<span style=color:#66d9ef>int</span> <span style=color:#f92672>*</span>)<span style=color:#f92672>&amp;</span>l<span style=color:#f92672>+</span><span style=color:#ae81ff>1</span>, <span style=color:#f92672>&amp;</span>l));
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#75715e>// !5 = !{!6, !6, i64 0}
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// !6 = !{!&#34;long&#34;, !7, i64 0}
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// !7 = !{!&#34;omnipotent char&#34;, !8, i64 0}
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// !8 = !{!&#34;Simple C++ TBAA&#34;}
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// !9 = !{!10, !10, i64 0}
+</span></span></span><span style=display:flex><span><span style=color:#75715e>// !10 = !{!&#34;int&#34;, !7, i64 0}
+</span></span></span></code></pre></div><p>这里我们的环境下 int 是 4-bytes，long 是 8-bytes，所以变量 <code>l</code> 对应 64-bytes shadow memory。</p><ol><li><p>初始时，变量 <code>l</code> 所在 8-bytes 对应 64-bytes shadow memory 的内容都是 0 即 unknown。</p></li><li><p>执行 <code>*y = 1</code>时首先判断 <code>y</code> 的 TypeDescriptorFromShadowMemory 的值，因为变量 <code>l</code> 所在 8-bytes 对应 64-bytes shadow memory 的内容都是 unknown，所以调用函数 <code>__tysan_set()</code> 进行设置，根据 <code>*y = 1</code> 将变量 <code>l</code> 所在 8-bytes 对应 64-bytes shadow memory 设置为如下内容：</p><pre tabindex=0><code>+---------------------+----+----+----+----+----+----+----+
+| __tysan_v1_long_o_0 | -1 | -2 | -3 | -4 | -5 | -6 | -7 |
++---------------------+----+----+----+----+----+----+----+
+</code></pre></li><li><p>执行 <code>*x = 0</code>时，发现 <code>x</code> 的 TypeDescriptorFromShadowMemory 值为 -4，TypeDescriptorFromMetadata 为 __tysan_v1_int_o_0。显然 TypeDescriptorFromShadowMemory 不等于 TypeDescriptorFromMetadata，所以调用 <code>__tysan_check()</code> 函数检查是否存在 type-based aliasing violations。</p><ol><li><p>因为 TypeDescriptorFromShadowMemory 为 -4 表示的是偏移，更新 TypeDescriptorFromShadowMemory 指向 __tysan_v1_long_o_0。</p></li><li><p>此时检查是否存在 type-based aliasing violations 就是检查 <code>!isAliasingLegal(__tysan_v1_int_o_0, __tysan_v1_long_o_0)</code> 的返回值。显然 __tysan_v1_int_o_0 和 __tysan_v1_long_o_0 不是 legal aliasing，即 <code>!isAliasingLegal(__tysan_v1_int_o_0, __tysan_v1_long_o_0)</code> 返回值为 true。</p></li><li><p>最后调用 <code>reportError()</code> 函数报错，报错信息如下：</p><pre tabindex=0><code>ERROR: TypeSanitizer: type-aliasing-violation on address 0x7ffcb0e822b4 (pc 0x55b4e6cf04d6 bp 0x7ffcb0e82260 sp 0x7ffcb0e81a18 tid 2615428)
+WRITE of size 4 at 0x7ffcb0e822b4 with type int accesses part of an existing object of type long that starts at offset -4
+ #0 0x55b4e6cf04d5 in foo(int*, long*) (a.out+0x334d5)
+</code></pre></li></ol></li></ol><h2 id=ps>P.S.</h2><p>本文的最后，简单说下如何在编程时避免写出 strict aliasing violation 的代码。</p><p>最常见的违反 strict aliasing rule 的写法就是 type punning：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>func</span>(<span style=color:#66d9ef>double</span> d) {
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>union</span> <span style=color:#a6e22e>u1</span>
+</span></span><span style=display:flex><span>    {
+</span></span><span style=display:flex><span>      std<span style=color:#f92672>::</span><span style=color:#66d9ef>int64_t</span> n;
+</span></span><span style=display:flex><span>      <span style=color:#66d9ef>double</span> d ;
+</span></span><span style=display:flex><span>    } ;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    u1 u ;
+</span></span><span style=display:flex><span>    u.d <span style=color:#f92672>=</span> d ;
+</span></span><span style=display:flex><span>    printf( <span style=color:#e6db74>&#34;%&#34;</span> PRId64 <span style=color:#e6db74>&#34;</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, u.n ) ; <span style=color:#75715e>// UB in C++,  n is not the active member
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>}
+</span></span></code></pre></div><p>在 C++ 中实现 type punning 的标准写法应该是 <code>memcpy</code>：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>func</span>( <span style=color:#66d9ef>double</span> d )
+</span></span><span style=display:flex><span>{
+</span></span><span style=display:flex><span>    std<span style=color:#f92672>::</span><span style=color:#66d9ef>int64_t</span> n;
+</span></span><span style=display:flex><span>    std<span style=color:#f92672>::</span>memcpy(<span style=color:#f92672>&amp;</span>n, <span style=color:#f92672>&amp;</span>d, <span style=color:#66d9ef>sizeof</span> d); <span style=color:#75715e>// OK
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    printf( <span style=color:#e6db74>&#34;%&#34;</span> PRId64 <span style=color:#e6db74>&#34;</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, n ) ;
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>上述两种实现编译生成的汇编代码是完全一样的，memcpy 并不会有额外的开销：<a href=https://godbolt.org/z/xTKjxTejc>Compiler Explorer</a>！</p><h2 id=references>References</h2><ol><li><p><a href=https://gist.github.com/shafik/848ae25ee209f698763cffee272a58f8>What is the Strict Aliasing Rule and Why do we care? - Shafik Yaghmour</a></p></li><li><p><a href=https://lists.llvm.org/pipermail/llvm-dev/2017-April/112189.html>[RFC] Design of a TBAA sanitizer - llvm-dev at lists.llvm.org</a></p></li><li><p><a href="https://www.youtube.com/watch?v=vAXJeN7k32Y">The Type Sanitizer: Free Yourself from -fno-strict-aliasing - 2017 LLVM Developers&rsquo; Meeting</a></p></li><li><p><a href=https://discourse.llvm.org/t/reviving-typesanitizer-a-sanitizer-to-catch-type-based-aliasing-violations/66092>Reviving TypeSanitizer - a sanitizer to catch type-based aliasing violations - Sanitizers - LLVM Discussion Forums</a></p></li></ol></div><footer class=post__footer><div class="post__tags tags clearfix"><svg class="tags__badge icon icon-tag" width="16" height="16" viewBox="0 0 32 32"><path d="M32 19c0 1-1 2-1 2L21 31s-1 1-2 1-2-1-2-1L2 16c-1-1-1.4-2-1.4-2S0 12.5.0 11V3C0 1.5.8.8.8.8S1.5.0 3 0h8c1.5.0 3 .6 3 .6S15 1 16 2l15 15s1 1 1 2zM7 10a3 3 0 100-6 3 3 0 000 6z"/></svg><ul class=tags__list><li class=tags__item><a class="tags__link btn" href=/tags/c++/ rel=tag>C++</a></li><li class=tags__item><a class="tags__link btn" href=/tags/llvm/ rel=tag>LLVM</a></li><li class=tags__item><a class="tags__link btn" href=/tags/sanitizer/ rel=tag>Sanitizer</a></li></ul></div></footer></article></main><section class=comments><div id=disqus_thread></div><script type=application/javascript>window.disqus_config=function(){},function(){if(["localhost","127.0.0.1"].indexOf(window.location.hostname)!=-1){document.getElementById("disqus_thread").innerHTML="Disqus comments not available by default when the website is previewed locally.";return}var t=document,e=t.createElement("script");e.async=!0,e.src="//enna1-github-io.disqus.com/embed.js",e.setAttribute("data-timestamp",+new Date),(t.head||t.body).appendChild(e)}()</script><noscript>Please enable JavaScript to view the <a href=https://disqus.com/?ref_noscript>comments powered by Disqus.</a></noscript><a href=https://disqus.com class=dsq-brlink>comments powered by <span class=logo-disqus>Disqus</span></a></section></div><aside class=sidebar><div class="widget-search widget"><form class=widget-search__form role=search method=get action=https://google.com/search><label><input class=widget-search__field type=search placeholder=SEARCH… name=q aria-label=SEARCH…></label>
+<input class=widget-search__submit type=submit value=Search>
+<input type=hidden name=sitesearch value=https://enna1.github.io/></form></div><div class="widget-recent widget"><h4 class=widget__title>Recent Posts</h4><div class=widget__content><ul class=widget__list><li class=widget__item><a class=widget__link href=/post/strict_aliasing-tbaa-and-type_sanitizer/>Strict Aliasing, TBAA and TypeSanitizer</a></li><li class=widget__item><a class=widget__link href=/post/dissecting-thread-sanitizer/>Dissecting ThreadSanitizer Algorithm</a></li><li class=widget__item><a class=widget__link href=/post/how-sanitizer-get-stacktrace/>How Sanitizer Get Stack Trace</a></li><li class=widget__item><a class=widget__link href=/post/how-sanitizer-interceptor-works/>How Sanitizer Interceptor Works</a></li><li class=widget__item><a class=widget__link href=/post/how-sanitizer-runtime-init/>How Sanitizer Runtime Initialized</a></li><li class=widget__item><a class=widget__link href=/post/dumb-sanitizer-howto/>How To Write A Dumb Sanitizer</a></li></ul></div></div><div class="widget-categories widget"><h4 class=widget__title>Categories</h4><div class=widget__content><ul class=widget__list><li class=widget__item><a class=widget__link href=/categories/programming/>Programming</a></li></ul></div></div><div class="widget-taglist widget"><h4 class=widget__title>Tags</h4><div class=widget__content><a class="widget-taglist__link widget__link btn" href=/tags/c++/ title=C++>C++</a>
+<a class="widget-taglist__link widget__link btn" href=/tags/llvm/ title=LLVM>LLVM</a>
+<a class="widget-taglist__link widget__link btn" href=/tags/sanitizer/ title=Sanitizer>Sanitizer</a></div></div><div class="widget-social widget"><h4 class="widget-social__title widget__title">Social</h4><div class="widget-social__content widget__content"><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title=GitHub rel="noopener noreferrer" href=https://github.com/Enna1 target=_blank><svg class="widget-social__link-icon icon icon-github" width="24" height="24" viewBox="0 0 384 374"><path d="m192 0C85.9.0.0 85.8.0 191.7c0 84.7 55 156.6 131.3 181.9 9.6 1.8 13.1-4.2 13.1-9.2.0-4.6-.2-16.6-.3-32.6-53.4 11.6-64.7-25.7-64.7-25.7-8.7-22.1-21.3-28-21.3-28-17.4-11.9 1.3-11.6 1.3-11.6 19.3 1.4 29.4 19.8 29.4 19.8 17.1 29.3 44.9 20.8 55.9 15.9 1.7-12.4 6.7-20.8 12.2-25.6-42.6-4.8-87.5-21.3-87.5-94.8.0-20.9 7.5-38 19.8-51.4-2-4.9-8.6-24.3 1.9-50.7.0.0 16.1-5.2 52.8 19.7 15.3-4.2 31.7-6.4 48.1-6.5 16.3.1 32.7 2.2 48.1 6.5 36.7-24.8 52.8-19.7 52.8-19.7 10.5 26.4 3.9 45.9 1.9 50.7 12.3 13.4 19.7 30.5 19.7 51.4.0 73.7-44.9 89.9-87.7 94.6 6.9 5.9 13 17.6 13 35.5.0 25.6-.2 46.3-.2 52.6.0 5.1 3.5 11.1 13.2 9.2C329 348.2 384 276.4 384 191.7 384 85.8 298 0 192 0z"/></svg><span>GitHub</span></a></div><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title=Email href=mailto:xumingjie.enna1@bytedance.com><svg class="widget-social__link-icon icon icon-mail" width="24" height="24" viewBox="0 0 416 288"><path d="m0 16v256 16h16 384 16v-16V16 0h-16H16 0zm347 16-139 92.5L69 32zM199 157.5l9 5.5 9-5.5L384 46v210H32V46z"/></svg><span>xumingjie.enna1@bytedance.com</span></a></div><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title="Blog RSS" rel="noopener noreferrer" href=/post/index.xml target=_blank><svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328.0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765.0 183.105.0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686.0 38.981.0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg><span>Blog RSS</span></a></div><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title="Podcast RSS" rel="noopener noreferrer" href=/podcast/index.xml target=_blank><svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328.0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765.0 183.105.0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686.0 38.981.0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg><span>Podcast RSS</span></a></div></div></div></aside></div><footer class=footer><div class="container footer__container flex"><div class=footer__copyright>&copy; 2022 Enna1.
+<span class=footer__copyright-credits>Generated with <a href=https://gohugo.io/ rel="nofollow noopener" target=_blank>Hugo</a> and <a href=https://github.com/Vimux/Mainroad/ rel="nofollow noopener" target=_blank>Mainroad</a> theme.</span></div></div></footer></div><script async defer src=/js/menu.js></script></body></html>
