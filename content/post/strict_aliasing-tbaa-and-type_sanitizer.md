@@ -41,7 +41,7 @@ int main() {
 
 上述代码，不管是 GCC 还是 Clang 在 O3 优化等级下运行结果都是 5.000000，但是在 O0 的优化等级下运行结果就是 -5.000000。如果在 O3 优化等级下再加 `-fno-strict-aliasing` 编译选项，此时运行结果就又变成了 -5.000000。
 
-为什么会出现上述现象？简单来说就是上述代码因违反了 strict aliasing rule 而导致代码中存在定义行为 (Undefined Behavior, UB)，而一旦程序中有了未定义行为，则什么事情都有可能发生了。
+为什么会出现上述现象？简单来说就是上述代码因违反了 strict aliasing rule 而导致代码中存在未定义行为 (Undefined Behavior, UB)，而一旦程序中有了未定义行为，则什么事情都有可能发生了。
 
 有关 strict aliasing rule 在 [C++ 17 标准](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/n4659.pdf)中 [basic.lval] 一节有如下描述：
 
@@ -112,7 +112,7 @@ float i_am_clever(unsigned int *i, float *f) {
 
 [Type-Based Alias Analysis - PLDI'98](https://dl.acm.org/citation.cfm?id=277670) 这篇论文在介绍 TBAA 算法时是基于 Modula-3 这个编程语言来进行说明的，所以我们得先了解下 Modula-3 这个编程语言。
 
-Modula-3 是一门 staticlly typed, type-safe 的编程语言。在 Modula-3 中有三种 memory referneces：
+Modula-3 是一门 statically typed, type-safe 的编程语言。在 Modula-3 中有三种 memory references：
 
 | Notation | Name      | Description                    |
 | -------- | --------- | ------------------------------ |
@@ -130,7 +130,7 @@ Modula-3 是一门 staticlly typed, type-safe 的编程语言。在 Modula-3 中
 
 - $Subtypes(T)$ 表示由类型 T 和 T 的所有子类型所构成的集合。
 
-并且在 Modula-3 中，类型转换只允许在基类和它的子类之间进行，同时类型 T 的 memory references 能够访问类型 T 及子类的所有字段。
+并且在 Modula-3 中，类型转换只允许在基类和它的子类之间进行，类型 T 的 memory references 能够访问类型 T 及子类的所有字段。
 
 论文中介绍了三种基于类型来做别名分析的算法：
 
@@ -340,7 +340,7 @@ TBAA metadata node 一共有三种：scalar type node, struct type node 和 path
   path tag node 用于标识一次 load/store，attach 到  的 load/store 指令后的 `!tbaa` 就是 TBAA path tag node。path tag node 由四个字段组成：第一个字段是 base type node，可以是 scalar type node 或 struct type node；第二个字段是 access type node，一定是 scalar type node；第三个字段是偏移；第四个字段是可选字段，与 scalar type node 的最后一个字段有着同样的意义，如果为 1 表示本次访问的是 [pointsToConstantMemory](https://llvm.org/doxygen/classllvm_1_1AAResults.html#a2017d417fc2e73c8bcc5acb6a0688016)。
   
   ```
-  p2->s.i = 2
+  p2->s.i = 2;
   ```
   
   对应的 LLVM IR 就是：
@@ -557,7 +557,7 @@ define i64 @_Z3fooPiPl(ptr %x, ptr %y) {
 entry:
   store i64 1, ptr %y, align 8, !tbaa !5
   store i32 0, ptr %x, align 4, !tbaa !9
-  ret i64 0
+  ret i64 1
 }
 
 !5 = !{!6, !6, i64 0}
@@ -642,7 +642,7 @@ define i64 @_Z3fooPiPl(ptr %x, ptr %y) {
 entry:
   store i64 1, ptr %y, align 8, !tbaa !5
   store i32 0, ptr %x, align 4, !tbaa !9
-  ret i64 0
+  ret i64 1
 }
 
 !5 = !{!6, !6, i64 0}
@@ -858,27 +858,32 @@ int main(void) {
 
 1. 初始时，变量 `l` 所在 8-bytes 对应 64-bytes shadow memory 的内容都是 0 即 unknown。
 
-2. 执行 `*y = 1`时首先判断 `y` 的 TypeDescriptorFromShadowMemory 的值，因为变量 `l` 所在 8-bytes 对应 64-bytes shadow memory 的内容都是 unknown，所以调用函数 `__tysan_set()` 进行设置，根据 `*y = 1` 将变量 `l` 所在 8-bytes 对应 64-bytes shadow memory 设置为如下内容：
-   
-   ```
-   +---------------------+----+----+----+----+----+----+----+
-   | __tysan_v1_long_o_0 | -1 | -2 | -3 | -4 | -5 | -6 | -7 |
-   +---------------------+----+----+----+----+----+----+----+
-   ```
+2. 执行 `*y = 1`时首先判断 `y` 的 TypeDescriptorFromShadowMemory 的值，因为变量 `l` 所在 8-bytes 对应 64-bytes shadow memory 的内容都是 unknown，所以调用函数 `__tysan_set()` 进行设置，根据 `*y = 1` 将变量 `l` 所在 8-bytes 对应 64-bytes shadow memory 设置为如下内容（每一个框表示 8-bytes，tysan_v1_long_o_0 是第 1 个 8-bytes 的内容，-1 是第 2 个 8-bytes 的内容）：
+
+```
++-----------------+-----------------+-----------------+-----------------+
+|tysan_v1_long_o_0|       -1        |       -2        |       -3        |
++-----------------+-----------------+-----------------+-----------------+
+|       -4        |       -5        |       -6        |       -7        |
++-----------------+-----------------+-----------------+-----------------+
+```
 
 3. 执行 `*x = 0`时，发现 `x` 的 TypeDescriptorFromShadowMemory 值为 -4，TypeDescriptorFromMetadata 为 __tysan_v1_int_o_0。显然 TypeDescriptorFromShadowMemory 不等于 TypeDescriptorFromMetadata，所以调用 `__tysan_check()` 函数检查是否存在 type-based aliasing violations。
    
    1. 因为 TypeDescriptorFromShadowMemory 为 -4 表示的是偏移，更新 TypeDescriptorFromShadowMemory 指向 __tysan_v1_long_o_0。
    
    2. 此时检查是否存在 type-based aliasing violations 就是检查 `!isAliasingLegal(__tysan_v1_int_o_0, __tysan_v1_long_o_0)` 的返回值。显然  __tysan_v1_int_o_0 和 __tysan_v1_long_o_0 不是 legal aliasing，即 `!isAliasingLegal(__tysan_v1_int_o_0, __tysan_v1_long_o_0)` 返回值为 true。
-   
-   3. 最后调用 `reportError()` 函数报错，报错信息如下：
-      
-      ```
-      ERROR: TypeSanitizer: type-aliasing-violation on address 0x7ffcb0e822b4 (pc 0x55b4e6cf04d6 bp 0x7ffcb0e82260 sp 0x7ffcb0e81a18 tid 2615428)
-      WRITE of size 4 at 0x7ffcb0e822b4 with type int accesses part of an existing object of type long that starts at offset -4
-       #0 0x55b4e6cf04d5 in foo(int*, long*) (a.out+0x334d5)
-      ```
+
+4. 最后调用 `reportError()` 函数报错，报错信息如下：
+
+```
+ERROR: TypeSanitizer: type-aliasing-violation on address 0x7ffcb0e822b4 (pc 0x55b4e6cf04d6 bp 0x7ffcb0e82260 sp 0x7ffcb0e81a18 tid 2615428)
+WRITE of size 4 at 0x7ffcb0e822b4 with type int accesses part of an existing object of type long that starts at offset -4
+  #0 0x55b4e6cf04d5 in foo(int*, long*) (a.out+0x334d5)
+```
+
+简单总结一下，TypeSanitizer 将检测程序中是否存在 type-based aliasing violations 这一问题转化为了如下问题：
+对于同一内存位置的最近两次访问，第一次访问是以 TypeA 类型去访问的，第二次访问是以 TypeB 类型去访问的，判断 TypeA 和 TypeB 之间是否满足 TBAA 别名关系，如果 TypeA 和 TypeB 之间不满足 TBAA 别名关系，那么对于该内存位置的最近两次访问就存在 type-based aliasing violations。
 
 ## P.S.
 
@@ -888,26 +893,24 @@ int main(void) {
 
 ```cpp
 void func(double d) {
-    union u1
-    {
+    union u1 {
       std::int64_t n;
-      double d ;
-    } ;
+      double d;
+    };
 
-    u1 u ;
-    u.d = d ;
-    printf( "%" PRId64 "\n", u.n ) ; // UB in C++,  n is not the active member
+    u1 u;
+    u.d = d;
+    printf("%" PRId64 "\n", u.n); // UB in C++,  n is not the active member
 }
 ```
 
 在 C++ 中实现 type punning 的标准写法应该是 `memcpy`：
 
 ```cpp
-void func( double d )
-{
+void func(double d) {
     std::int64_t n;
     std::memcpy(&n, &d, sizeof d); // OK
-    printf( "%" PRId64 "\n", n ) ;
+    printf("%" PRId64 "\n", n);
 }
 ```
 
