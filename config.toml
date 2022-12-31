@@ -18,7 +18,7 @@ disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Di
   pager = false # Show "prev", "next" button
   post_meta = ["date", "categories"] # Order of post meta information
   # Do not show podcast content in home
-  mainSections = ["post"] # mainSections = ["post", "podcast"]
+  mainSections = ["post", "random"] # mainSections = ["post", "podcast"]
   mathjax = false # Enable MathJax
 
 [Params.logo]
@@ -63,6 +63,12 @@ disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Di
   weight = 20
   identifier = "blog"
   url = "/post/"
+
+[[menu.main]]
+  name = "random"
+  weight = 21
+  identifier = "random"
+  url = "/random/"
 
 [[menu.main]]
   name = "podcast"
