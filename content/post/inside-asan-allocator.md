@@ -17,7 +17,7 @@ toc: true
 
 AddressSanitizer 通过 intercept malloc/free, new/delete 的调用，使得开启 ASan 后程序的内存分配和释放都由 ASan allocator 负责，本文深入分析了 AddressSanitizer Allocator 的实现。
 
-ASan allocator 与其他 allocator 不同的点：
+ASan allocator 与其他 allocator 有一些明显不同的点，例如：
 
 - 为了检测 heap-buffer-overflow，ASan allocator 在分配内存时会在用户申请的内存左右两侧多申请内存作为 redzone，这样一旦访问到 redzone 就说明发生了溢出，这样 ASan 就检测到了 heap-buffer-overflow。
 
@@ -75,19 +75,19 @@ COMPILER_CHECK(kChunkHeaderSize == 16);
 ```
 
 - chunk_state 顾名思义表示 chunk 的状态，有 3 种可能取值：
-  
+
   - CHUNK_INVALID: either just allocated by underlying allocator, but chunk is not yet ready, or almost returned to undelying allocator and chunk is already meaningless.
-  
+
   - CHUNK_ALLOCATED: the chunk is allocated and not yet freed.
-  
+
   - CHUNK_QUARANTINE: the chunk was freed and put into quarantine zone.
 
 - alloc_type 有 3 种可能取值：
-  
+
   - FROM_MALLOC：表示当前 chunk 是通过 `malloc`, `calloc`, `realloc` 申请的
-  
+
   - FROM_NEW：表示当前 chunk 是通过 `operator new` 申请的
-  
+
   - FROM_NEW_BR：表示当前 chunk 是通过 `operator new[]` 申请的
 
 - lsan_tag 是 LeakSanitizer 用的，本文不涉及
@@ -122,12 +122,12 @@ uptr ComputeNeededSize(uptr size, uptr alignment) {
 1. 首先根据用户申请的内存大小计算所需的 redzone 大小 rz_size。基本逻辑是用户申请的内存越大，则对应的 redzone 就越大。并且如前所述， rz_size 最小就是 ChunkHeader 的大小 16-bytes。
 
 2. 计算 rounded_size 是将 `Max(size, kChunkHeader2Size)` 对齐至 alignment，这是因为：对于已经释放的内存，ASan 需要像用 `atomic_uint64_t alloc_context_id` 保存申请内存的线程 id 和 stacktrace 一样，使用 `atomic_uint64_t free_context_id` 记录释放内存的线程 id 和 stacktrace。通过 `Max(size, kChunkHeader2Size)` 使得 chunk 中 user memory 的大小至少为 kChunkHeader2Size，这样 ASan 就可以通过复用 user memory 来保存 free_context_id 了。
-   
+
    ```cpp
    class ChunkBase : public ChunkHeader {
      atomic_uint64_t free_context_id;
    };
-   
+
    static const uptr kChunkHeader2Size = sizeof(ChunkBase) - kChunkHeaderSize;
    COMPILER_CHECK(kChunkHeader2Size <= 16);
    ```
@@ -207,37 +207,37 @@ ASan 使用的 SizeClassMap 模版参数为：kNumBits=3, kMinSizeLog=4, kMidSiz
 ```
 
 - 当 AllocationSize <= kMidSize 时，SizeClass 对应的 AllocationSize 都是以 kMinSize=2^kMinSizeLog=16 的 step 进行增长的，所以我们可以通过 `(size + kMinSize - 1) >> kMinSizeLog` 得到 AllocationSize 对应的 SizeClass 大小。
-  
+
   例如：AllocationSize 为 160 时，对应的 SizeClass 为 `(160 + 16 - 1) >> 4` 即 10。
 
 - 当 AllocationSize > KMidSize 时，计算 AllocationSize 对应的 SizeClass 稍显复杂。
-  
+
   首先我们需要明确 AllocationSize > KMidSize 时，AllocationSize 的增长方式：因为 kNumBits=3，所以 kMidSize=256 之后的 AllocationSize 的二进制表示都是形如 0b1xx0..0，x 的可能取值是 0 或 1。kMidSize=256，二进制表示为 0b100000000，所以 256 后面紧跟的 4 个 AllocationSize 分别是 0b**101**000000, 0b**110**000000, 0b**111**000000, 0b**1000**000000。
-  
+
   从 KMidSize=256 开始，每隔 2^(kNumBits-1)=4 个 SizeClass，AllocationSize 的最高有效位会左移一次。
-  
+
   - SizeClass: 16, AllocationSize=0b100000000
-  
+
   - SizeClass: 17, AllocationSize=0b101000000
-  
+
   - SizeClass: 18, AllocationSize=0b110000000
-  
+
   - SizeClass: 19, AllocationSize=0b111000000
-  
+
   - SizeClass: 20, AllocationSize=0b1000000000
-  
+
   所以对于一个给定的 AllocationSize=0b1xx0..0 来说，我们可以将它拆分成两部分：`AllocationSize = 0b1xx0..0 = 0b1000..0 + 0b0xx0..0`，我们将 0b**1**000..0 记作 AllocationSizeBase，将 0b0**xx0.00** 记作 AllocationSizeOffset。
-  
+
   1. 首先计算其 AllocationSize 最高有效位的下标索引，其最高有效位的位置相比 KMidSize 的最高有效位的位置左移了 x 位，那么 AllocationSizeBase 所对应的 SizeClass 就是 kMidClass + x * 2^(kNumBits-1)
-  
+
   2. 然后再看 AllocationSize 最高有效位后的 kNumBits - 1 位，该 kNumBits - 1 位构成的数与 (2^(kNumBits-1) - 1) 做**与运算**得到的值就是给定的 AllocationSize 相比 AllocationSizeBase 又增加了几个 SizeClass
-  
+
   我们以 AllocationSize 为 640 为例进行说明：
-  
+
   1. 640=0b1010000000，最高有效位是第 9 位；KMidSize = 256 = 0b100000000，其最高有效位是第 8 位，那么 0b1000000000 = 512 对应的 ClassId 就是 kMidClass + (9 - 8) * 2^(kNumBits-1) = 16 + 1 * 2^(3-1) = 20
-  
+
   2. 640=0b1010000000，最高有效位后的 kNumBit-1=2 位就是 0b01，0b01 & (2^(kNumBits-1) - 1) = 0b01 & 3 = 1
-  
+
   3. 所以 AllocationSize = 640 对应的 ClassId 就是 20 + 1 = 21
 
 ### ClassId To AllocationSize
@@ -266,9 +266,9 @@ ASan 使用的 SizeClassMap 模版参数为：kNumBits=3, kMinSizeLog=4, kMidSiz
 - 当 class_id <= kMidClass 时，class_id 对应的 AllocationSize 都是以 kMinSize=2^kMinSizeLog=16 的 step 进行增长的，所以我们可以通过 kMinSize*class_id 得到 class_id 对应的 AllocationSize。
 
 - 当 class_id > kMidClass 时，因为从 kMidClass=16 开始，每隔 2^(kNumBits-1)=4 个 SizeClass，AllocationSize 就会增大一倍。
-  
+
   对于一个给定的 AllocationSize=0b1xx0..0 来说，我们可以将它拆分成两部分：`AllocationSize = 0b1xx0..0 = 0b1000..0 + 0b0xx0..0`，我们将 0b**1**000..0 记作 AllocationSizeBase，将 0b0**xx0.00** 记作 AllocationSizeOffset。
-  
+
   `t = kMidSize << (class_id >> S)` 就是计算 AllocationSizeBase 的值，`(t >> S) * (class_id & M)` 就是计算 AllocationSizeOffset 的值
 
 ## AsanThreadLocalMallocStorage
@@ -280,19 +280,19 @@ ASan 使用的 SizeClassMap 模版参数为：kNumBits=3, kMinSizeLog=4, kMidSiz
 AsanThreadLocalMallocStorage 包含两个成员变量：quarantine_cache 和 allocator_cache。
 
 - quarantine_cache
-  
+
   当应用程序释放 memory chunk 时，并不会直接将其释放，而是会将其（实际上是指向该 memory chunk 的指针）保存在当前线程的 quarantine_cache 中。如果当前线程的 quarantine_cache 中保存的所有 memory chunks 的总大小超过了阈值 thread_local_quarantine_size_kb（默认为 1024KB，可以通过环境变量 ASAN_OPTIONS 进行设置），则会将当前线程 quarantine_cache 中保存的 chunks 转移到全局 central quarantine 中。而当全局 central quarantine 中保存的所有 chunks 的总大小超过了阈值 quarantine_size_mb（默认为 256MB，可以通过环境变量 ASAN_OPTIONS 进行设置），才会真正释放这些 memory chunks。
-  
+
   quarantine_cache 有两个成员变量：`atomic_uintptr_t size_` 和 `IntrusiveList<QuarantineBatch> list_`。
-  
+
   - `atomic_uintptr_t size_`：用于记录 quarantine_cache 中保存的所有 chunks 的大小之和。
-  
+
   - `IntrusiveList<QuarantineBatch> list_`：当应用程序释放 memory chunk 时，会将指向该 chunk 的指针保存在 list_ 的最后一个 QuarantineBatch 中。每个 QuarantineBatch 中最多保存 1021 个指向已释放的 chunk 的指针，一旦 QuarantineBatch 占满后，会新创建一个 QuarantineBatch 添加至 list_ 末尾。
 
 - allocator_cache：
-  
+
   对于小于等于 128KB 的内存分配申请，会优先从 allocator_cache 中选择提前从 PrimaryAllocator 分配好的保存在 allocator_cache 中的空闲 chunk 返回。由于每个线程都有一个 allocator_cache，因此从 allocator_cache 中取一个空闲 chunk 返回给应用程序是不需要加锁的，开销很小。
-  
+
   allocator_cache 的关键成员变量是 `PerClass per_class_[kNumClasses]`，每个 PerClass 对应一个 SizeClass。以 per_class_[1] 为例，per_class_[1].size = 16 表明 per_class_[1].chunks 中保存的是提前由 PrimaryAllocator 分配好的大小为 16-bytes 的 chunks；per_class_[1].count 表示当前 per_class_[1].chunks 中空闲的 chunk 的数量；当 per_class_[1].count = 0 即 per_class_[1].chunks 中没有空闲的 memory chunks 时，会从 PrimaryAllocator 中分配 per_class_[1].max_count / 2 = 256 / 2 = 128 个大小为 16-bytes 的 memory chunks 保存至 per_class_[1].chunks 中，供后续使用。不同的 per_class_[i]，其 max_count 是不同的，例如 per_class_[1].max_count = 256, per_class_[24].max_count = 128, per_class_[52].max_count = 2。
 
 ## PrimaryAllocator(SizeClassAllocator64)
@@ -304,13 +304,13 @@ ASan allocator 的 PrimaryAllocator 就是代码中的 SizeClassAllocator64。Pr
 Address space 由两部分组成：一块大小为 kSpaceSize 的连续内存地址空间，本文中称之为 RegionSpace；一块大小为 AdditionalSize 的连续内存地址空间，本文中称之为 RegionInfoSpace。
 
 - RegionSpace
-  
+
   RegionSpace 的起始地址是 kSpaceBeg = 0x600000000000，结束地址是 SpaceEnd = kSpaceBeg + kSpaceSize = 0x600000000000 + 0x40000000000 = 0x640000000000。RegionSpace 被平均分为 kNumClassesRounded = 64 个 Region，每个 Region 的大小都是 0x1000000000。不同的 Region 用于不同的 SizeClass 的内存分配，例如 Region of ClassId1 用于 16-bytes memory chunk 的分配，Region of ClassId2 用于 32-bytes memory chunk 的分配。
-  
+
   每个 Region 又是由 UserChunk, MetaChunk 和 FreeArray 组成的，而实际上 ASan 没有 MetaChunk，所以 Region 其实是由 UserChunk 和 FreeArray 组成的。UserChunk 就是后续返回给用户的 chunk，同一 Region 的 UserChunk 大小是固定的，例如 Region of ClassId1 中的 UserChunk 的大小就是 16-bytes。每个 Region 的最后 1/8 大小用作 FreeArray，FreeArray 中保存了空闲的可用于分配的 UserChunk（在代码实现上， FreeArray 中存储的是空闲的 UserChunk 的地址相对于其所在 Region 起始地址的相对偏移，相对偏移用 4-bytes 整型来存储，这样可以节省空间）。
 
 - RegionInfoSpace
-  
+
   RegionInfoSpace 起始地址就是 RegionSpace 的结束地址。每一个 Region 都会对应一个 RegionInfo，RegionInfo 中保存了对应的 Region 的相关信息，如 Region 中已经分配给用户的内存大小，详见结构体 RegionInfo 的定义。
 
 ## SecondaryAllocator(LargeMmapAllocator)
@@ -329,7 +329,7 @@ ASan allocator 的 SecondaryAllocator 就是代码中的 LargeMmapAllocator。La
 
 ![](/blog/inside-asan-allocator/17f5e7268583a90ca1879c5d39d88d209ea1ad9e.png)
 
-SecondaryAllocator 会维护一个数组 ptr_array_，该数组中保存的是指向SecondaryAllocator 已分配内存的 Header 的指针：
+SecondaryAllocator 会维护一个数组 ptr_array_，该数组中保存的是指向 SecondaryAllocator 已分配内存的 Header 的指针：
 
 ![](/blog/inside-asan-allocator/00d2ede99be2fc0eb375ea439dda0294a3839963.png)
 
@@ -337,7 +337,7 @@ SecondaryAllocator 会维护一个数组 ptr_array_，该数组中保存的是�
 
 ## The flow of asan_allocate()
 
-我们将 ASan allocator 分配内存的流程抽象为 `asan_allocate()`，`asan_allocate()` 的流程图如下所示：
+我们将 ASan allocator 分配内存的流程抽象为 `asan_allocate()`，流程图如下所示：
 
 ![](/blog/inside-asan-allocator/dfc21568b22771cc9718eae247460e64a7ba4811.png)
 
@@ -351,11 +351,11 @@ SecondaryAllocator 会维护一个数组 ptr_array_，该数组中保存的是�
 
 5. 对于 > 128KB 的内存分配由 SecondaryAllocator 负责，SecondaryAllocator 通过 mmap 申请内存返回给用户。
 
-6. 如果在步骤 4 或步骤 5 中没有足够的内存可供分配，则报错 "out-of-memory" 终止程序。
+6. 如果在步骤 4 或步骤 5 中没有足够的内存可供分配，则报错 "out-of-memory" 并终止程序。
 
 7. 成功申请到了内存后，设置 ChunkHeader：alloc_type, user_requested_alignment_log, user_requested_size, alloc_context_id。
 
-8. 将 memory chunk 中 user memory 对应的 shadow memory 的每个字节的值都设置为表示 addressable 的 magic value，将 memory chunk 中 redzone 对应的 shadow memory 的每个字节的值设置为表示 redzone 的 magic value: kAsanHeapLeftRedzoneMagic。
+8. 将 chunk 中 user memory 对应的 shadow memory 的每个字节的值都设置为表示 addressable 的 magic value，将 chunk 中 redzone 对应的 shadow memory 的每个字节的值设置为表示 redzone 的 magic value: kAsanHeapLeftRedzoneMagic。
 
 9. 然后 malloc_fill 就是填充 user memory 的内容，通过 memset 将 user memory 的值设置为 0xbe，默认情况下最多只填充 user memory 的前 4KB。可以通过在环境变量 ASAN_OPTIONS 设置 max_malloc_fill_size 来控制最多填充 user memory 的多少个字节，默认 max_malloc_fill_size=0x1000；可以通过在环境变量 ASAN_OPTIONS 设置 malloc_fill_byte 即用于填充 user memory 每个字节的值，默认malloc_fill_byte=0xbe。
 
@@ -363,7 +363,7 @@ SecondaryAllocator 会维护一个数组 ptr_array_，该数组中保存的是�
 
 ## The flow of asan_deallocate()
 
-我们将 ASan allocator 释放内存的流程抽象为 `asan_deallocate()`，完整的流程如下图所示：
+我们将 ASan allocator 释放内存的流程抽象为 `asan_deallocate()`，流程图如下所示：
 
 ![](/blog/inside-asan-allocator/fb0a999302bb8b253329a5b679c52430fc10f38b.png)
 
@@ -389,7 +389,7 @@ SecondaryAllocator 会维护一个数组 ptr_array_，该数组中保存的是�
 
 11. 将 extracted chunks 中 user memory 对应的 shadow memory 每个字节的值设置为 kAsanHeapLeftRedzoneMagic，表示这些 extraced chunks 已经真正被释放了，不再保存在 quarantine 中，交由 PrimaryAllocator 或 SecondaryAllocator 去释放。
 
-12. 判断每一个 extracted chunk 在申请时是由 PrimaryAllocator 或 SecondaryAllocator 分配的。如果是由 PrimaryAllocator 分配的，那么执行步骤 12 交给 PrimaryAllocator 释放；如果是由 SecondaryAllocator 分配的，那么执行步骤 13 交给 SecondaryAllocator 释放。
+12. 判断每一个 extracted chunk 在申请时是由 PrimaryAllocator 或 SecondaryAllocator 分配的。如果是由 PrimaryAllocator 分配的，那么执行步骤 13 交给 PrimaryAllocator 释放；如果是由 SecondaryAllocator 分配的，那么执行步骤 14 交给 SecondaryAllocator 释放。
 
 13. 由 PrimaryAllocator 释放 extracted chunk，首先查看 extraced chunk 属于哪一个 size class，如果当前线程 allocator cache 中该 size class 的空闲 chunks 已经满了 (per_class_[size_class].count == per_class_[size_class].max_count)，那么将该 size class 的空闲 chunks 的一半归还给 PrimaryAllocator，保存在 PrimaryAllocator 对应的 Region 的 FreeArray 中，PrimaryAllocator 会定期将 FreeArray 中的 chunks 归还给操作系统。最后将 extracted chunk 添加至当前线程 allocator cache 中对应的 per_class_ 中。执行步骤 15。
 
