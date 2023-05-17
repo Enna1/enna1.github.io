@@ -1,7 +1,7 @@
 baseURL = 'https://enna1.github.io/'
 languageCode = 'en-us'
 title = "Enna1's website"
-theme = "mainroad"
+theme = ["mainroad", "hugo-embed-pdf-shortcode"]
 disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Disqus shortname
 
 [Author] # Used in authorbox

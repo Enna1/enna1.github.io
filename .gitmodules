@@ -1,3 +1,6 @@
 [submodule "themes/mainroad"]
 	path = themes/mainroad
 	url = git@github.com:Enna1/Mainroad.git
+[submodule "themes/hugo-embed-pdf-shortcode"]
+	path = themes/hugo-embed-pdf-shortcode
+	url = https://github.com/anvithks/hugo-embed-pdf-shortcode.git
