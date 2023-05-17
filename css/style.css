@@ -55,7 +55,7 @@ body {
 .container {
 	position: relative;
 	width: 100%;
-	max-width: 1080px;
+	max-width: 1200px;
 	margin: 0 auto;
 }
 
@@ -75,16 +75,16 @@ body {
 }
 
 .primary {
-	-webkit-flex: 1 0 65.83%;
-	flex: 1 0 65.83%;
+	-webkit-flex: 1 0 71.83%;
+	flex: 1 0 71.83%;
 	-webkit-order: 1;
 	order: 1;
 	min-width: 0;
 }
 
 .sidebar {
-	-webkit-flex: 1 0 31.66%;
-	flex: 1 0 31.66%;
+	-webkit-flex: 1 0 25.66%;
+	flex: 1 0 25.66%;
 	-webkit-order: 2;
 	order: 2;
 	min-width: 0;
