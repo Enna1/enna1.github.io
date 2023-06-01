@@ -1,11 +1,11 @@
 ---
-title: "A Tree Clock Data Structure for Causal Orderings in Concurrent Executions"
+title: "Paper Reading | A Tree Clock Data Structure for Causal Orderings in Concurrent Executions"
 date: 2022-05-22
 categories:
   - "Programming"
 tags:
-- "Sanitizer"
-- "Data Race"
+  - "Paper Reading"
+  - "Data Race"
 katex: true
 comments: true # Enable Disqus comments for specific page
 toc: true

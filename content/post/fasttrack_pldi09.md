@@ -1,11 +1,11 @@
 ---
-title: "FastTrack: efficient and precise dynamic race detection"
+title: "Paper Reading | FastTrack: efficient and precise dynamic race detection"
 date: 2022-02-20
 categories:
   - "Programming"
 tags:
-- "Sanitizer"
-- "Data Race"
+  - "Paper Reading"
+  - "Data Race"
 katex: true
 comments: true # Enable Disqus comments for specific page
 toc: true

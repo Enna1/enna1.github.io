@@ -1,10 +1,11 @@
 ---
-title: "Exploiting Superword Level Parallelism with Multimedia Instruction Sets"
+title: "Paper Reading | Exploiting Superword Level Parallelism with Multimedia Instruction Sets"
 date: 2022-02-02
 categories:
   - "Programming"
 tags:
-- "Vectorizer"
+  - "Paper Reading"
+  - "Vectorizer"
 katex: true
 comments: true # Enable Disqus comments for specific page
 toc: true
