@@ -1,0 +1,159 @@
+<!doctype html><html class=no-js lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta http-equiv=x-ua-compatible content="IE=edge"><title>Learn COMDAT with inline functions - Enna1's website</title><script>(function(e,t){e[t]=e[t].replace("no-js","js")})(document.documentElement,"className")</script><meta name=description content><meta property="og:title" content="Learn COMDAT with inline functions"><meta property="og:description" content="本文通过一个 inline 函数的例子学习 COMDAT 的作用。"><meta property="og:type" content="article"><meta property="og:url" content="https://enna1.github.io/post/learn-comdat-with-inline-functions/"><meta property="article:section" content="post"><meta property="article:published_time" content="2023-07-23T00:00:00+00:00"><meta property="article:modified_time" content="2023-07-23T00:00:00+00:00"><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link rel=dns-prefetch href=//fonts.googleapis.com><link rel=dns-prefetch href=//fonts.gstatic.com><link rel=stylesheet href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700"><link rel=stylesheet href=/css/style.css><link rel="shortcut icon" href=/favicon.ico></head><body class=body><div class="container container--outer"><header class=header><div class="container header__container"><div class=logo><a class=logo__link href=/ title="Enna1's website" rel=home><div class="logo__item logo__text"><div class=logo__title>Enna1's website</div><div class=logo__tagline>Nobody dies a virgin, life fucks us all!</div></div></a></div><nav class=menu><button class=menu__btn aria-haspopup=true aria-expanded=false tabindex=0>
+<span class=menu__btn-title tabindex=-1>Menu</span></button><ul class=menu__list><li class=menu__item><a class=menu__link href=/><span class=menu__text>home</span></a></li><li class=menu__item><a class=menu__link href=/post/><span class=menu__text>blog</span></a></li><li class=menu__item><a class=menu__link href=/random/><span class=menu__text>random</span></a></li><li class=menu__item><a class=menu__link href=/podcast/><span class=menu__text>podcast</span></a></li><li class=menu__item><a class=menu__link href=/archives/><span class=menu__text>archives</span></a></li><li class=menu__item><a class=menu__link href=/about/><span class=menu__text>about</span></a></li></ul></nav></div></header><div class="wrapper flex"><div class=primary><main class=main role=main><article class=post><header class=post__header><h1 class=post__title>Learn COMDAT with inline functions</h1><div class="post__meta meta"><div class="meta__item-datetime meta__item"><svg class="meta__icon icon icon-time" width="16" height="14" viewBox="0 0 30 28"><path d="M15 0C7 0 1 6 1 14s6 14 14 14 14-6 14-14S23 0 15 0zm0 25C9 25 4 20 4 14S9 3 15 3s11 5 11 11-5 11-11 11zm1-18h-2v8.4l6.8 4.4L22 18l-6-3.8V7z"/></svg><time class=meta__text datetime=2023-07-23T00:00:00Z>July 23, 2023</time></div><div class="meta__item-categories meta__item"><svg class="meta__icon icon icon-category" width="16" height="16" viewBox="0 0 16 16"><path d="m7 2 1 2h8v11H0V2z"/></svg><span class=meta__text><a class=meta__link href=/categories/programming/ rel=category>Programming</a></span></div></div></header><div class="post__toc toc"><div class=toc__title>Page content</div><div class=toc__menu><nav id=TableOfContents><ul><li><a href=#weak-definition>Weak definition</a></li><li><a href=#comdatsection-group>COMDAT/section group</a></li><li><a href=#usage-of-comdat>Usage of COMDAT</a></li><li><a href=#reference>Reference</a></li></ul></nav></div></div><div class="content post__content clearfix"><p>本文通过一个 inline 函数的例子学习 COMDAT 的作用。</p><p>考虑以下例子：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#75715e>//--- a.cpp
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#66d9ef>inline</span> <span style=color:#66d9ef>const</span> <span style=color:#66d9ef>char</span><span style=color:#f92672>*</span> <span style=color:#a6e22e>hello</span>() { <span style=color:#66d9ef>return</span> <span style=color:#e6db74>&#34;Hello,World!&#34;</span>; }
+</span></span><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>foo</span>() { printf(<span style=color:#e6db74>&#34;%s: %s</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, __FILE__, hello()); }
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>main</span>() {
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> <span style=color:#ae81ff>0</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#75715e>//--- b.cpp
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#66d9ef>inline</span> <span style=color:#66d9ef>const</span> <span style=color:#66d9ef>char</span><span style=color:#f92672>*</span> <span style=color:#a6e22e>hello</span>() { <span style=color:#66d9ef>return</span> <span style=color:#e6db74>&#34;Hello,World!&#34;</span>; }
+</span></span><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>bar</span>() { printf(<span style=color:#e6db74>&#34;%s: %s</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, __FILE__, hello()); }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#75715e>// clang a.cpp b.cpp -o a.out
+</span></span></span></code></pre></div><p>该例子，在 a.cpp 中定义了 inline 函数 <code>hello()</code>，在 b.cpp 中同样定义了 inline 函数 <code>hello()</code>，最终在编译链接产物 a.out 中只会保留一份 inline 函数 <code>hello()</code> 的定义。</p><p>那么在 a.out 中只保留一份 inline 函数 <code>hello()</code> 的定义是如何实现呢？</p><p>注：对于一个 inline 函数，如果其在不同编译单元的定义不一样，则是未定义行为。</p><h2 id=weak-definition>Weak definition</h2><p>使用 <code>readelf</code> 可以看到 a.out 中函数 <code>hello()</code> 的符号是 weak 的。</p><pre tabindex=0><code>$ readelf -sW a.out | grep hello
+    50: 0000000000401170    16 FUNC    WEAK   DEFAULT   13 _Z5hellov
+</code></pre><p>对于在多个编译单元都有定义的 weak 符号，链接器是不会报错该符号存在重复定义的，并且链接器会将所有对该符号的引用指向该符号的第一处定义。</p><p>那么 inline 函数是否就是单纯将函数设置为 weak 符号呢？</p><p>可以直接写个测试用例验证下：</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#75715e>//--- weak_a.cpp
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>__attribute__((weak)) <span style=color:#66d9ef>const</span> <span style=color:#66d9ef>char</span><span style=color:#f92672>*</span> hello() { <span style=color:#66d9ef>return</span> <span style=color:#e6db74>&#34;Hello,World!&#34;</span>; }
+</span></span><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>foo</span>() { printf(<span style=color:#e6db74>&#34;%s: %s</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, __FILE__, hello()); }
+</span></span><span style=display:flex><span><span style=color:#66d9ef>int</span> <span style=color:#a6e22e>main</span>() {
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>return</span> <span style=color:#ae81ff>0</span>;
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#75715e>//--- weak_b.cpp
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>__attribute__((weak)) <span style=color:#66d9ef>const</span> <span style=color:#66d9ef>char</span><span style=color:#f92672>*</span> hello() { <span style=color:#66d9ef>return</span> <span style=color:#e6db74>&#34;Hello,World!&#34;</span>; }
+</span></span><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>bar</span>() { printf(<span style=color:#e6db74>&#34;%s: %s</span><span style=color:#ae81ff>\n</span><span style=color:#e6db74>&#34;</span>, __FILE__, hello()); }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#75715e>// clang weak_a.cpp weak_b.cpp -o a.out.weak
+</span></span></span></code></pre></div><p>虽然使用 <code>readelf</code> 可以看到 a.out.weak 中函数 <code>hello()</code> 的符号属性是一模一样的，但是仔细看 <code>objdump</code> 反汇编 a.out.weak 的结果：</p><pre tabindex=0><code>0000000000401130 &lt;_Z5hellov&gt;:
+  401130:       55                      push   %rbp
+  401131:       48 89 e5                mov    %rsp,%rbp
+  401134:       48 b8 04 20 40 00 00    movabs $0x402004,%rax
+  40113b:       00 00 00
+  40113e:       5d                      pop    %rbp
+  40113f:       c3                      retq
+
+0000000000401170 &lt;main&gt;:
+  401170:       55                      push   %rbp
+  401171:       48 89 e5                mov    %rsp,%rbp
+  401174:       31 c0                   xor    %eax,%eax
+  401176:       c7 45 fc 00 00 00 00    movl   $0x0,-0x4(%rbp)
+  40117d:       5d                      pop    %rbp
+  40117e:       c3                      retq
+  40117f:       90                      nop
+  401180:       55                      push   %rbp
+  401181:       48 89 e5                mov    %rsp,%rbp
+  401184:       48 b8 04 20 40 00 00    movabs $0x402004,%rax
+  40118b:       00 00 00
+  40118e:       5d                      pop    %rbp
+  40118f:       c3                      retq
+</code></pre><p>在 a.out.weak 中只有一个函数 <code>hello</code> 的符号，但是仔细看 <code>main</code> 函数的反汇编 ，<code>40117f</code> 处就是 <code>main</code> 函数的结束，<code>401180 - 40118f</code> 这段汇编指令与 <code>401130 - 40113f</code> 这段函数 <code>hello</code> 的汇编指令是一模一样的，<code>401180 - 40118f</code> 这段汇编指令其实就是定义在 b.cpp 的函数 <code>hello</code> 的实现。</p><p>这说明单纯将函数 <code>hello</code> 设置为 weak 符号，虽然使得最终链接产物只有一个 <code>hello</code> 符号，但是 .text section 中实际上还是保留了定义在不同编译单元的 <code>hello</code> 的代码/汇编指令。</p><p>对比 <code>objdump</code> 反汇编 a.out 的结果，将函数 <code>hello</code> 设置为 inline 使得 .text section 只保留了一份 <code>hello</code> 代码/汇编指令。</p><pre tabindex=0><code>0000000000401160 &lt;main&gt;:
+  401160:       55                      push   %rbp
+  401161:       48 89 e5                mov    %rsp,%rbp
+  401164:       31 c0                   xor    %eax,%eax
+  401166:       c7 45 fc 00 00 00 00    movl   $0x0,-0x4(%rbp)
+  40116d:       5d                      pop    %rbp
+  40116e:       c3                      retq
+  40116f:       90                      nop
+
+0000000000401170 &lt;_Z5hellov&gt;:
+  401170:       55                      push   %rbp
+  401171:       48 89 e5                mov    %rsp,%rbp
+  401174:       48 b8 12 20 40 00 00    movabs $0x402012,%rax
+  40117b:       00 00 00
+  40117e:       5d                      pop    %rbp
+  40117f:       c3                      retq
+</code></pre><h2 id=comdatsection-group>COMDAT/section group</h2><p>那么在 a.out 中只保留一份 inline 函数 <code>hello()</code> 的定义是如何实现呢？</p><p>对比 a.cpp 与 weak_a.cpp、b.cpp 与 weak_b.cpp 对应的 LLVM IR：</p><pre tabindex=0><code>; clang -S -emit-llvm a.cpp -o -
+$_Z5hellov = comdat any
+
+@.str.2 = private unnamed_addr constant [13 x i8] c&#34;Hello,World!\00&#34;, align 1
+
+; Function Attrs: noinline nounwind optnone uwtable
+define linkonce_odr dso_local i8* @_Z5hellov() #2 comdat {
+entry:
+  ret i8* getelementptr inbounds ([13 x i8], [13 x i8]* @.str.2, i64 0, i64 0)
+}
+
+; clang -S -emit-llvm weak_a.cpp -o -
+@.str = private unnamed_addr constant [13 x i8] c&#34;Hello,World!\00&#34;, align 1
+
+; Function Attrs: noinline optnone uwtable
+define weak dso_local i8* @_Z5hellov() #0 {
+entry:
+  ret i8* getelementptr inbounds ([13 x i8], [13 x i8]* @.str, i64 0, i64 0)
+}
+</code></pre><pre tabindex=0><code>; clang -S -emit-llvm b.cpp -o -
+$_Z5hellov = comdat any
+
+@.str.2 = private unnamed_addr constant [13 x i8] c&#34;Hello,World!\00&#34;, align 1
+
+; Function Attrs: noinline nounwind optnone uwtable
+define linkonce_odr dso_local i8* @_Z5hellov() #2 comdat {
+entry:
+  ret i8* getelementptr inbounds ([13 x i8], [13 x i8]* @.str.2, i64 0, i64 0)
+}
+
+; clang -S -emit-llvm weak_b.cpp -o -
+@.str = private unnamed_addr constant [13 x i8] c&#34;Hello,World!\00&#34;, align 1
+
+; Function Attrs: noinline optnone uwtable
+define weak dso_local i8* @_Z5hellov() #0 {
+entry:
+  ret i8* getelementptr inbounds ([13 x i8], [13 x i8]* @.str, i64 0, i64 0)
+}
+</code></pre><p>a.cpp 与 weak_a.cpp、b.cpp 与 weak_b.cpp 对应的 LLVM IR 之间的关键区别在于 <code>$_Z5hellov = comdat any</code>！</p><p>根据 <a href=https://llvm.org/docs/LangRef.html#comdats>https://llvm.org/docs/LangRef.html#comdats</a></p><blockquote><p>Comdat IR provides access to object file COMDAT/section group functionality which represents interrelated sections.</p><p>Comdats have a name which represents the COMDAT key and a selection kind to provide input on how the linker deduplicates comdats with the same key in two different object files. A comdat must be included or omitted as a unit. Discarding the whole comdat is allowed but discarding a subset is not.</p><p>A global object may be a member of at most one comdat.</p><p>For selection kinds other than <code>nodeduplicate</code>, only one of the duplicate comdats may be retained by the linker and the members of the remaining comdats must be discarded.</p><p>For selection kind <code>any</code>, the linker may choose any COMDAT key, the choice is arbitrary.</p></blockquote><p>a.cpp 和 b.cpp 对应的 LLVM IR 中都创建了一个 key 为 <code>_Z5hellov</code> 的 COMDAT，并且 a.cpp 中定义的函数 <code>hello</code> 属于 a.cpp 中的 <code>_Z5hellov</code> COMDAT，b.cpp 中定义的函数 <code>hello</code> 属于 b.cpp 中的 <code>_Z5hellov</code> COMDAT。在链接时，对于 a.cpp 和 b.cpp 中的 <code>_Z5hellov</code> COMDAT，链接器会任意选择其中一个 <code>_Z5hellov</code> COMDAT 保留，并丢弃另外的 <code>_Z5hellov</code> COMDAT。假设链接器选择保留 a.cpp 的 <code>_Z5hellov</code> COMDAT，那么会丢弃掉 b.cpp 的 <code>_Z5hellov</code> COMDAT，b.cpp 的 <code>_Z5hellov</code> COMDAT 中的函数 <code>hello</code> 也就会被丢弃。</p><p><code>readelf</code> 提供了一个选项 <code>-g --section-groups</code> 查看 section groups，查看 a.cpp 和 b.cpp 对应的目标文件 a.o 和 b.o 的 section groups：</p><pre tabindex=0><code>$ readelf -g a.o
+COMDAT group section [    4] `.group&#39; [_Z5hellov] contains 2 sections:
+   [Index]    Name
+   [    5]   .text._Z5hellov
+   [    6]   .rela.text._Z5hellov
+
+$ readelf -g b.o
+COMDAT group section [    4] `.group&#39; [_Z5hellov] contains 2 sections:
+   [Index]    Name
+   [    5]   .text._Z5hellov
+   [    6]   .rela.text._Z5hellov
+</code></pre><p>通过 <code>objdump</code> 查看 a.o 的 .text._Z5hellov section 的内容，可以看到 .text._Z5hellov section 中就是函数 <code>hello</code> 的定义：</p><pre tabindex=0><code>$ objdump -d a.o
+Disassembly of section .text._Z5hellov:
+0000000000000000 &lt;_Z5hellov&gt;:
+   0:        55                           push   %rbp
+   1:        48 89 e5                     mov    %rsp,%rbp
+   4:        48 b8 00 00 00 00 00         movabs $0x0,%rax
+   b:        00 00 00
+   e:        5d                           pop    %rbp
+   f:        c3                           retq
+</code></pre><p>作为对比，weak_a.cpp 对应的目标文件 weak_a.o 则没有任何 section group：</p><pre tabindex=0><code>$ readelf -g weak_a.o
+There are no section groups in this file.
+</code></pre><p>除了 COMDAT 外，a.cpp 与 weak_a.cpp、b.cpp 与 weak_b.cpp 对应的 LLVM IR 还有一点区分：a.cpp/b.cpp 对应的 LLVM IR 中函数 <code>hello</code> 的 linkage type 是 linkonce_odr，而 weak_a.cpp/weak_b.cpp 对应的 LLVM IR 中函数 <code>hello</code> 的 linkage type 是 weak。关于 linkage type 的详细解释见 <a href=https://llvm.org/docs/LangRef.html#linkage-types>https://llvm.org/docs/LangRef.html#linkage-types</a> 。</p><h2 id=usage-of-comdat>Usage of COMDAT</h2><p>如果我们想通过 LLVM IR 层面插桩的方式实现为链接产物添加一个函数定义 <code>foo</code>，那么可以编写一个 <u><a href=https://llvm.org/doxygen/classllvm_1_1ModulePass.html>ModulePass</a></u>，为每一个 Module 都插入一个 <code>foo</code> 函数定义。因为 C++ 项目会有很多个编译单元，所以为每个编译单元执行该 ModulePass 会为每个编译单元都插入一个 <code>foo</code> 函数定义。尽管我们可以将函数 <code>foo</code> 的 linkage type 设置为 linkonce_odr，但是还是会使得最终链接产物中有多份 <code>foo</code> 函数的副本，增加 .text section 的大小。这个时候就可以利用 COMDAT，在 ModulePass 中创建函数<code>foo</code> 时同时创建一个 key 为 foo 的 COMDAT，将函数<code>foo</code>添加至该 COMDAT 中，这样在最终链接产物中就只会保留一份 <code>foo</code> 函数了。</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-cpp data-lang=cpp><span style=display:flex><span><span style=color:#66d9ef>void</span> <span style=color:#a6e22e>insertFunctionFoo</span>(llvm<span style=color:#f92672>::</span>Module <span style=color:#f92672>&amp;</span>M) {
+</span></span><span style=display:flex><span>  llvm<span style=color:#f92672>::</span>FunctionType <span style=color:#f92672>*</span>FTT <span style=color:#f92672>=</span> llvm<span style=color:#f92672>::</span>FunctionType<span style=color:#f92672>::</span>get(Int8PtrTy, false);
+</span></span><span style=display:flex><span>  llvm<span style=color:#f92672>::</span>FunctionCallee FC <span style=color:#f92672>=</span> M.getOrInsertFunction(<span style=color:#e6db74>&#34;foo&#34;</span>, FTT);
+</span></span><span style=display:flex><span>  llvm<span style=color:#f92672>::</span>Function <span style=color:#f92672>*</span>F <span style=color:#f92672>=</span> dyn_cast<span style=color:#f92672>&lt;</span>llvm<span style=color:#f92672>::</span>Function<span style=color:#f92672>&gt;</span>(FC.getCallee());
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>if</span> (F <span style=color:#f92672>&amp;&amp;</span> F<span style=color:#f92672>-&gt;</span>isDeclaration()) {
+</span></span><span style=display:flex><span>    F<span style=color:#f92672>-&gt;</span>setComdat(M.getOrInsertComdat(<span style=color:#e6db74>&#34;foo&#34;</span>));
+</span></span><span style=display:flex><span>    F<span style=color:#f92672>-&gt;</span>setLinkage(llvm<span style=color:#f92672>::</span>GlobalValue<span style=color:#f92672>::</span>LinkOnceODRLinkage);
+</span></span><span style=display:flex><span>    llvm<span style=color:#f92672>::</span>BasicBlock <span style=color:#f92672>*</span>BB <span style=color:#f92672>=</span>
+</span></span><span style=display:flex><span>        llvm<span style=color:#f92672>::</span>BasicBlock<span style=color:#f92672>::</span>Create(M.getContext(), <span style=color:#e6db74>&#34;entry&#34;</span>, F);
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// Create a constant string &#34;Hello,World&#34;
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// We use private linkage for module-local string, and set the unnamed_addr
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    <span style=color:#75715e>// attribute to make it can be merged with another one.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    llvm<span style=color:#f92672>::</span>Constant <span style=color:#f92672>*</span>StrConst <span style=color:#f92672>=</span> llvm<span style=color:#f92672>::</span>ConstantDataArray<span style=color:#f92672>::</span>getString(
+</span></span><span style=display:flex><span>        M.getContext(), <span style=color:#e6db74>&#34;Hello,World&#34;</span>);
+</span></span><span style=display:flex><span>    llvm<span style=color:#f92672>::</span>GlobalVariable <span style=color:#f92672>*</span>GV <span style=color:#f92672>=</span> <span style=color:#66d9ef>new</span> llvm<span style=color:#f92672>::</span>GlobalVariable(
+</span></span><span style=display:flex><span>        M, StrConst<span style=color:#f92672>-&gt;</span>getType(), true, llvm<span style=color:#f92672>::</span>GlobalValue<span style=color:#f92672>::</span>PrivateLinkage,
+</span></span><span style=display:flex><span>        StrConst, <span style=color:#e6db74>&#34;hello_world_string_constant&#34;</span>);
+</span></span><span style=display:flex><span>    GV<span style=color:#f92672>-&gt;</span>setUnnamedAddr(llvm<span style=color:#f92672>::</span>GlobalValue<span style=color:#f92672>::</span>UnnamedAddr<span style=color:#f92672>::</span>Global);
+</span></span><span style=display:flex><span>    <span style=color:#75715e>// Strings may not be merged w/o setting alignment explicitly.
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>    GV<span style=color:#f92672>-&gt;</span>setAlignment(llvm<span style=color:#f92672>::</span>Align(<span style=color:#ae81ff>1</span>));
+</span></span><span style=display:flex><span>    llvm<span style=color:#f92672>::</span>ReturnInst<span style=color:#f92672>::</span>Create(
+</span></span><span style=display:flex><span>        M.getContext(),
+</span></span><span style=display:flex><span>        llvm<span style=color:#f92672>::</span>ConstantExpr<span style=color:#f92672>::</span>getPointerCast(GV, Int8PtrTy), BB);
+</span></span><span style=display:flex><span>  }
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><h2 id=reference>Reference</h2><p><a href=https://maskray.me/blog/2021-07-25-comdat-and-section-group>https://maskray.me/blog/2021-07-25-comdat-and-section-group</a></p></div><footer class=post__footer><div class="post__tags tags clearfix"><svg class="tags__badge icon icon-tag" width="16" height="16" viewBox="0 0 32 32"><path d="M32 19c0 1-1 2-1 2L21 31s-1 1-2 1-2-1-2-1L2 16c-1-1-1.4-2-1.4-2S0 12.5.0 11V3C0 1.5.8.8.8.8S1.5.0 3 0h8c1.5.0 3 .6 3 .6S15 1 16 2l15 15s1 1 1 2zM7 10a3 3 0 100-6 3 3 0 000 6z"/></svg><ul class=tags__list><li class=tags__item><a class="tags__link btn" href=/tags/llvm/ rel=tag>LLVM</a></li></ul></div></footer></article></main><section class=comments><div id=disqus_thread></div><script type=application/javascript>window.disqus_config=function(){},function(){if(["localhost","127.0.0.1"].indexOf(window.location.hostname)!=-1){document.getElementById("disqus_thread").innerHTML="Disqus comments not available by default when the website is previewed locally.";return}var t=document,e=t.createElement("script");e.async=!0,e.src="//enna1-github-io.disqus.com/embed.js",e.setAttribute("data-timestamp",+new Date),(t.head||t.body).appendChild(e)}()</script><noscript>Please enable JavaScript to view the <a href=https://disqus.com/?ref_noscript>comments powered by Disqus.</a></noscript><a href=https://disqus.com class=dsq-brlink>comments powered by <span class=logo-disqus>Disqus</span></a></section></div><aside class=sidebar><div class="widget-search widget"><form class=widget-search__form role=search method=get action=https://google.com/search><label><input class=widget-search__field type=search placeholder=SEARCH… name=q aria-label=SEARCH…></label>
+<input class=widget-search__submit type=submit value=Search>
+<input type=hidden name=sitesearch value=https://enna1.github.io/></form></div><div class="widget-recent widget"><h4 class=widget__title>Recent Posts</h4><div class=widget__content><ul class=widget__list><li class=widget__item><a class=widget__link href=/post/learn-comdat-with-inline-functions/>Learn COMDAT with inline functions</a></li><li class=widget__item><a class=widget__link href=/post/learn-relocation-by-debugging-a-hwasan-linker-error/>Learn Relocation by Debugging a HWASAN Linker Error</a></li><li class=widget__item><a class=widget__link href=/random/2023-5-15-a-whirlwind-tour-of-the-llvm-optimizer/>A whirlwind tour of the LLVM optimizer</a></li><li class=widget__item><a class=widget__link href=/post/hwasan-internals/>HWASAN Internals</a></li><li class=widget__item><a class=widget__link href=/post/inside-asan-allocator/>Inside AddressSanitizer Allocator</a></li><li class=widget__item><a class=widget__link href=/random/2022-12-31-summary/>2022 年度总结</a></li><li class=widget__item><a class=widget__link href=/post/strict_aliasing-tbaa-and-type_sanitizer/>Strict Aliasing, TBAA and TypeSanitizer</a></li><li class=widget__item><a class=widget__link href=/post/dissecting-thread-sanitizer/>Dissecting ThreadSanitizer Algorithm</a></li><li class=widget__item><a class=widget__link href=/post/how-sanitizer-get-stacktrace/>How Sanitizer Get Stack Trace</a></li><li class=widget__item><a class=widget__link href=/post/how-sanitizer-interceptor-works/>How Sanitizer Interceptor Works</a></li></ul></div></div><div class="widget-categories widget"><h4 class=widget__title>Categories</h4><div class=widget__content><ul class=widget__list><li class=widget__item><a class=widget__link href=/categories/programming/>Programming</a></li><li class=widget__item><a class=widget__link href=/categories/random/>Random</a></li></ul></div></div><div class="widget-taglist widget"><h4 class=widget__title>Tags</h4><div class=widget__content><a class="widget-taglist__link widget__link btn" href=/tags/c++/ title=C++>C++</a>
+<a class="widget-taglist__link widget__link btn" href=/tags/data-race/ title="Data Race">Data Race</a>
+<a class="widget-taglist__link widget__link btn" href=/tags/llvm/ title=LLVM>LLVM</a>
+<a class="widget-taglist__link widget__link btn" href=/tags/paper-reading/ title="Paper Reading">Paper Reading</a>
+<a class="widget-taglist__link widget__link btn" href=/tags/sanitizer/ title=Sanitizer>Sanitizer</a>
+<a class="widget-taglist__link widget__link btn" href=/tags/vectorizer/ title=Vectorizer>Vectorizer</a></div></div><div class="widget-social widget"><h4 class="widget-social__title widget__title">Social</h4><div class="widget-social__content widget__content"><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title=GitHub rel="noopener noreferrer" href=https://github.com/Enna1 target=_blank><svg class="widget-social__link-icon icon icon-github" width="24" height="24" viewBox="0 0 384 374"><path d="m192 0C85.9.0.0 85.8.0 191.7c0 84.7 55 156.6 131.3 181.9 9.6 1.8 13.1-4.2 13.1-9.2.0-4.6-.2-16.6-.3-32.6-53.4 11.6-64.7-25.7-64.7-25.7-8.7-22.1-21.3-28-21.3-28-17.4-11.9 1.3-11.6 1.3-11.6 19.3 1.4 29.4 19.8 29.4 19.8 17.1 29.3 44.9 20.8 55.9 15.9 1.7-12.4 6.7-20.8 12.2-25.6-42.6-4.8-87.5-21.3-87.5-94.8.0-20.9 7.5-38 19.8-51.4-2-4.9-8.6-24.3 1.9-50.7.0.0 16.1-5.2 52.8 19.7 15.3-4.2 31.7-6.4 48.1-6.5 16.3.1 32.7 2.2 48.1 6.5 36.7-24.8 52.8-19.7 52.8-19.7 10.5 26.4 3.9 45.9 1.9 50.7 12.3 13.4 19.7 30.5 19.7 51.4.0 73.7-44.9 89.9-87.7 94.6 6.9 5.9 13 17.6 13 35.5.0 25.6-.2 46.3-.2 52.6.0 5.1 3.5 11.1 13.2 9.2C329 348.2 384 276.4 384 191.7 384 85.8 298 0 192 0z"/></svg><span>GitHub</span></a></div><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title=Email href=mailto:xumingjie.enna1@bytedance.com><svg class="widget-social__link-icon icon icon-mail" width="24" height="24" viewBox="0 0 416 288"><path d="m0 16v256 16h16 384 16v-16V16 0h-16H16 0zm347 16-139 92.5L69 32zM199 157.5l9 5.5 9-5.5L384 46v210H32V46z"/></svg><span>xumingjie.enna1@bytedance.com</span></a></div><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title="Blog RSS" rel="noopener noreferrer" href=/post/index.xml target=_blank><svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328.0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765.0 183.105.0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686.0 38.981.0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg><span>Blog RSS</span></a></div><div class="widget-social__item widget__item"><a class="widget-social__link widget__link btn" title="Podcast RSS" rel="noopener noreferrer" href=/podcast/index.xml target=_blank><svg class="widget-social__link-icon icon icon-rss" width="24" height="24" viewBox="0 0 448 512"><path d="M128.081 415.959c0 35.369-28.672 64.041-64.041 64.041S0 451.328.0 415.959s28.672-64.041 64.041-64.041 64.04 28.673 64.04 64.041zm175.66 47.25c-8.354-154.6-132.185-278.587-286.95-286.95C7.656 175.765.0 183.105.0 192.253v48.069c0 8.415 6.49 15.472 14.887 16.018 111.832 7.284 201.473 96.702 208.772 208.772.547 8.397 7.604 14.887 16.018 14.887h48.069c9.149.001 16.489-7.655 15.995-16.79zm144.249.288C439.596 229.677 251.465 40.445 16.503 32.01 7.473 31.686.0 38.981.0 48.016v48.068c0 8.625 6.835 15.645 15.453 15.999 191.179 7.839 344.627 161.316 352.465 352.465.353 8.618 7.373 15.453 15.999 15.453h48.068c9.034-.001 16.329-7.474 16.005-16.504z"/></svg><span>Podcast RSS</span></a></div></div></div></aside></div><footer class=footer><div class="container footer__container flex"><div class=footer__copyright>&copy; 2023 Enna1.
+<span class=footer__copyright-credits>Generated with <a href=https://gohugo.io/ rel="nofollow noopener" target=_blank>Hugo</a> and <a href=https://github.com/Vimux/Mainroad/ rel="nofollow noopener" target=_blank>Mainroad</a> theme.</span></div></div></footer></div><script async defer src=/js/menu.js></script></body></html>
