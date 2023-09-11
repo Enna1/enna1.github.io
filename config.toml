@@ -88,11 +88,11 @@ disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Di
 #   identifier = "categories"
 #   url = "/categories/"
 
-# [[menu.main]]
-#   name = "tags"
-#   weight = 40
-#   identifier = "tags"
-#   url = "/tags/"
+[[menu.main]]
+  name = "codebrowser"
+  weight = 40
+  identifier = "codebrowser"
+  url = "/codebrowser/"
 
 [[menu.main]]
   name = "about"
