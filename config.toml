@@ -92,7 +92,7 @@ disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Di
   name = "codebrowser"
   weight = 40
   identifier = "codebrowser"
-  url = "/codebrowser/"
+  url = "https://codebrowser-llvm.github.io"
 
 [[menu.main]]
   name = "about"
