@@ -5,6 +5,7 @@ categories:
   - "Programming"
 tags:
   - "LLVM"
+  - "Vectorizer"
 katex: false
 comments: true # Enable Disqus comments for specific page
 toc: true
