@@ -103,6 +103,9 @@ disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Di
 [markup.goldmark.renderer]
   unsafe = true
 
+[markup.highlight]
+  style = 'github'
+
 [Params.Podcast]
   Title = "徐徐道来"
   local = false
