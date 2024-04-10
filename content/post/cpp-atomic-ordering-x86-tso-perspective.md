@@ -32,7 +32,7 @@ toc: true
 
 - 从 Intel® 64 and IA-32 Architectures Software Developer’s Manual 来理解为什么这些汇编指令可以用于实现对应的 memory_order 的 atomic load 和 atomic store。
 
-- 从 x86-TSO memory model 的角度来为什么这些汇编指令可以用于实现对应的 memory_order 的 atomic load 和 atomic store。
+- 从 x86-TSO memory model 的角度来理解为什么这些汇编指令可以用于实现对应的 memory_order 的 atomic load 和 atomic store。
 
 - 如何实现一个简易版本的适用于 x86-64 平台的 atomic_load 和 atomic_store。
 
@@ -617,7 +617,7 @@ x86-TSO programmer's model 如上图所示：
 
    5. $F_p$：Hardware thread $p$ 执行 MFENCE 指令会 flush 该 hardware thread $p$ 的 store buffer，即执行多次 $\tau_p$ 操作将保存在 store buffer 中的写操作生效至 shared memory，直至 store buffer 为空。
 
-   6. $L_p$：Hardware thread $p$ 执行带 LOCK 前缀的指令，首先会申请 storage subsystem 的 lock，然后执行指令，在指令执行结束后会 flush store buffer，最后释放 storage subsystem 的 lock。 注意：当某个 hardware thread 持有 storage subsystem 的 lock 时，其他 hardware threads 是 blocked，无法执行读写操作。
+   6. $L_p$：Hardware thread $p$ 执行带 LOCK 前缀的指令，首先会申请 storage subsystem 的 lock，然后执行指令，在指令执行结束后会 flush store buffer，最后释放 storage subsystem 的 lock。 注意：当某个 hardware thread 持有 storage subsystem 的 lock 时，其他 hardware threads 是 blocked，无法执行读操作。
 
 ### litmus tests
 
