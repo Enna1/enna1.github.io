@@ -132,9 +132,11 @@ Branch Probability Analysis 的算法如下：
 
    1. 基于 branch weight metadata 计算当前基本块到其后继基本块的分支概率。前面提到 `__builtin_expect`, `__builtin_expect_with_probability` 和采样到的运行时信息都可以帮助判断代码中分支执行的概率，在 LLVM IR 上这些信息都是以 branch weight metadata 的形式记录在基本块的 terminator instruction 上的。因此，如果基本块的 terminator instruction 存在 branch weight metadata，那么就基于 branch weight metadata 计算该基本块到其后继基本块的分支概率。
 
-   2. 基于基本块权重计算当前基本块到其后继基本块的分支概率。假设对于当前基本块 BB 存在两个后继基本块 Succ1 和 Succ2，BB -> Succ1 和 BB -> Succ2 这两条边的权重分别为 Weight1 和 Weight2，那么 BB -> Succ1 分支的概率为 Weight1 / (Weight1 + Weight2)，BB -> Succ2 分支概率为 Weight2 / (Weight1 + Weight2)。
+   2. 基于基本块权重计算当前基本块到其后继基本块的分支概率。假设对于当前基本块 BB 存在三个后继基本块 Succ1, Succ2 和 Succ3，BB -> Succ1, BB -> Succ2 和 BB -> Succ3 这三条边的权重分别为 Weight1, Weight2 和 Weight3，那么 BB -> Succ1 分支的概率为 Weight1 / (Weight1 + Weight2 + Weight3)，BB -> Succ2 分支概率为 Weight2 / (Weight1 + Weight2 + Weight3)，BB -> Succ3 分支概率为 Weight3 / (Weight1 + Weight2 + Weight3)。
 
-      特别地，如果 BB 属于某个循环，并且 Succ1 不在该循环中而 Succ2 在该循环中，那么需要先将 BB -> Succ1 这条边的权重 Weight1 除以循环的 TripCount，然后再参与计算 BB -> Succ1 分支概率：(Weight1 / TripCount) / (Weight1 / TripCount + Weight2)，其中 TripCount 是一个编译时常量 31。
+      如果在计算分支概率时，如果 BB -> Succ1 这条边有权重，但是 BB -> Succ2 和 BB -> Succ3 这两条边没有权重，那么会将 BB -> Succ2 和 BB -> Succ3 这两条边的权重视为默认值 0xfffff 参与计算分支概率。
+
+      特别地，如果 BB 属于某个循环，Succ1 不在该循环中而 Succ2 和 Succ3 在该循环中，那么需要先将 BB -> Succ1 这条边的权重 Weight1 除以循环的 TripCount，然后再参与计算分支概率，这种情况下 BB -> Succ1 分支概率：(Weight1 / TripCount) / (Weight1 / TripCount + Weight2 + Weight3)，其中 TripCount 是一个编译时常量 31。
 
    3. 基于 pointer heuristics 计算当前基本块到其后继基本块的分支概率。如果当前基本块 BB 的 terminator instruction 是 conditional `br` instruction 即条件分支指令，且分支条件就是比较两个指针是否相等，相等时执行基本块 SuccEQ，不等时执行基本块 SuccNE，那么将 BB -> SuccEQ 的这一分支概率设置为 37.5%，将 BB -> SuccNE 这一分支概率设置为 62.5%。
 
