@@ -423,7 +423,11 @@ GCC 和 Clang 为 `memory_order_relaxed` 的 atomic load/store 生成的汇编�
 
   注：这里 "word" 指的是 two 8-bit bytes，"doubleword" 即 32 bits，"quadword" 即 64 bits。
 
-  在 GCC libstdc++ 的 std::atomic 实现中，是直接通过 `alignas` 来指定其对齐的，见 https://github.com/gcc-mirror/gcc/blob/releases/gcc-14.1.0/libstdc%2B%2B-v3/include/bits/atomic_base.h#L348。
+  在 GCC libstdc++ 的 std::atomic 实现中，是直接通过 `alignas` 来指定其对齐的，见：
+  - https://github.com/gcc-mirror/gcc/blob/releases/gcc-14.1.0/libstdc%2B%2B-v3/include/std/atomic#L216
+  - https://github.com/gcc-mirror/gcc/blob/releases/gcc-14.1.0/libstdc%2B%2B-v3/include/bits/atomic_base.h#L348
+  - https://github.com/gcc-mirror/gcc/blob/releases/gcc-14.1.0/libstdc%2B%2B-v3/include/bits/atomic_base.h#L1476
+
   对于 integral scalar type（记作 _ITp），`std::atomic<_ITp>` 的 underlying object `_ITp _M_i` 的对齐被设置为 `sizeof(_ITp)` 和 `alignof(_ITp)` 的最大值。在本节使用的例子 https://godbolt.org/z/zaa7TzjbT 中，`sizeof(int) == 4`，`alignof(int) == 4`，即 `std::atomic<int>` 的 underlying object `int _M_i` 的对齐被设置为 `alignas(4)`，显然符合 "Reading or writing a doubleword aligned on a 32-bit boundary"，所以这里使用普通 MOV 指令就能保证 **atomicity**。
 
 - **modification order consistency**
