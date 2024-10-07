@@ -554,7 +554,7 @@ MaxAtomicSizeInBitsSupported 的代码注释是这样写的：
 
 > Size in bits of the maximum atomics size the backend supports. Accesses larger than this will be expanded by AtomicExpandPass。
 
-https://llvm.org/docs/Atomics.htm 中与 MaxAtomicSizeInBitsSupported 的相关描述：
+https://llvm.org/docs/Atomics.html 中与 MaxAtomicSizeInBitsSupported 的相关描述：
 
 > AtomicExpandPass can help with that: it will expand all atomic operations to the proper `__atomic_*` libcalls for any size above the maximum set by setMaxAtomicSizeInBitsSupported (which defaults to 0).
 >
@@ -617,7 +617,7 @@ entry:
 
 对于不支持 SSE 和 X87 指令的 x86-32 target，如果支持 CMPXCHG8B 指令，那么使用 CMPXCHG8B 指令实现 64-bits atomic load/store。
 对于不支持 AVX 指令的 x86-64 target，如果支持 CMPXCHG16B 指令，那么使用 CMPXCHG8B 指令实现 128-bits atomic load/store。
-对于上述情况，AtomicCmpXchgInst 在 LLVM IR 上将 atomic LoadInst, StoreInst 替换为 AtomicCmpXchgInst，对 AtomicCmpXchgInst 指令选择为 CMPXCHG8B/CMPXCHG16B 是 SelectionDAG Instruction Selection 负责的。
+对于上述情况，AtomicExpandPass 在 LLVM IR 上将 atomic LoadInst, StoreInst 替换为 AtomicCmpXchgInst，对 AtomicCmpXchgInst 指令选择为 CMPXCHG8B/CMPXCHG16B 是 SelectionDAG Instruction Selection 负责的。
 
 举个例子，使用 x86_64-unknown-linux-gnu Clang 编译如下代码时添加 `-mcx16` 编译选项，AtomicExpandPass 会使用 AtomicCmpXchgInst 替换 atomic LoadInst/StoreInst。在线示例 https://godbolt.org/z/frPjTvq4d。
 
