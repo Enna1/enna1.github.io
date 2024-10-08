@@ -357,7 +357,7 @@ Clang 还提供了一个与 builtin `__atomic_is_lock_free` 类似的 builtin `_
 >
 > - MaxAtomicInlineWidth: the maximum width lock-free atomic operation which can be inlined given the supported features of the given target.
 
-搜索 clang 代码，target 为 x86 时 MaxAtomicPromoteWidth 和 MaxAtomicInlineWidth 的取值如下：
+搜索 Clang 代码，target 为 x86 时 MaxAtomicPromoteWidth 和 MaxAtomicInlineWidth 的取值如下：
 
 - x86-32: MaxAtomicPromoteWidth = 64, MaxAtomicInlineWidth = 32.
   如果支持 CMPXCHG8B 指令，那么 MaxAtomicInlineWidth = 64。
@@ -616,7 +616,7 @@ entry:
 #### replace with better target specific instruction
 
 对于不支持 SSE 和 X87 指令的 x86-32 target，如果支持 CMPXCHG8B 指令，那么使用 CMPXCHG8B 指令实现 64-bits atomic load/store。
-对于不支持 AVX 指令的 x86-64 target，如果支持 CMPXCHG16B 指令，那么使用 CMPXCHG8B 指令实现 128-bits atomic load/store。
+对于不支持 AVX 指令的 x86-64 target，如果支持 CMPXCHG16B 指令，那么使用 CMPXCHG16B 指令实现 128-bits atomic load/store。
 对于上述情况，AtomicExpandPass 在 LLVM IR 上将 atomic LoadInst, StoreInst 替换为 AtomicCmpXchgInst，对 AtomicCmpXchgInst 指令选择为 CMPXCHG8B/CMPXCHG16B 是 SelectionDAG Instruction Selection 负责的。
 
 举个例子，使用 x86_64-unknown-linux-gnu Clang 编译如下代码时添加 `-mcx16` 编译选项，AtomicExpandPass 会使用 AtomicCmpXchgInst 替换 atomic LoadInst/StoreInst。在线示例 https://godbolt.org/z/frPjTvq4d。
@@ -799,7 +799,7 @@ Standard header for atomic types and operations: [clang/lib/Headers/stdatomic.h]
 
    > Built-in [increment and decrement operators](https://en.cppreference.com/w/c/language/operator_incdec) and [compound assignment](https://en.cppreference.com/w/c/language/operator_assignment) are read-modify-write atomic operations with total sequentially consistent ordering (as if using [memory_order_seq_cst](https://en.cppreference.com/w/c/atomic/memory_order)).
 
-考虑如下例子 https://godbolt.org/z/EfT8b1vza：
+考虑如下例子 https://godbolt.org/z/3dPx8PWr3：
 
 ```C
 // clang/test/CodeGen/pr45476.cpp
@@ -817,7 +817,7 @@ void bar() { b = s3{1, 2, 3}; }
 
 1. width 和 alignment：`sizeof(struct s3)=3`, `alignof(struct s3)=1`，而 `sizeof(_Atomic struct s3)=4`, `alignof(_Atomic struct s3)=4`
 
-2. operations：函数 `foo()` 中 `a = s3{1, 2, 3}` 对应的 LLVM IR 是一条 seq_cst atomic store 指令，而函数 `foo()` 中 `a = s3{1, 2, 3}` 对应的 LLVM IR 是三条普通的非 atomic 的 store 指令。
+2. operations：函数 `foo()` 中 `a = s3{1, 2, 3}` 对应的 LLVM IR 是一条 seq_cst atomic store 指令，而函数 `bar()` 中 `a = s3{1, 2, 3}` 对应的 LLVM IR 是 [`llvm.memcpy` intrinsic](https://llvm.org/docs/LangRef.html#llvm-memcpy-intrinsic)。
 
 ## 0x7. Implementation of C++11 std::atomic
 
