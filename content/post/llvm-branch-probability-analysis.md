@@ -310,6 +310,8 @@ https://godbolt.org/z/Ybn7PPEad
 
 那么 MachineBranchProbabilityInfo 是在什么时候设置的呢？答案：是从 LLVM IR 转换为 SelectionDAG IR 创建 `MachineBasicBlock` 时基于 BranchProbabilityInfo 设置的，并且保存在 `MachineBasicBlock` 的成员变量 `std::vector<BranchProbability> Probs` 中，该成员变量记录了当前 `MachineBasicBlock` 至其后继的分支概率信息。了解更多信息，可以学习 https://reviews.llvm.org/D13745。
 
+MachineBlockPlacement pass 会基于 MachineBranchProbabilityInfo 做 Basic Block Code Layout optimization。
+
 ## 0x6. References
 
 - https://llvm.org/docs/BranchWeightMetadata.html
