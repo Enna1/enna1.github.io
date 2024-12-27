@@ -14,7 +14,7 @@ toc: true
 
 <!--more-->
 
-## 0x0. Prologue
+## 0x1. Prologue
 
 笔者最近学习了下 LLVM 中 Branch Probability Analysis 这个 pass，写一篇博客记录下。
 
