@@ -223,6 +223,8 @@ The following four requirements are guaranteed for **all atomic operations**:
 > `memory_order_acquire`: A load operation with this memory order performs the *acquire operation* on the affected memory location: no reads or writes in the current thread can be reordered before this load.
 >
 > `memory_order_release`: A store operation with this memory order performs the *release operation*: no reads or writes in the current thread can be reordered after this store.
+>
+> `memory_order_acq_rel`: A read-modify-write operation with this memory order is both an acquire operation and a release operation. No memory reads or writes in the current thread can be reordered before the load, nor after the store.
 
 `memory_order_acquire` 和 `memory_order_release` 是比 `memory_order_relaxed` 更“强”的 memory order，不仅有与 `memory_order_relaxed` 一样的 atomicity 和 modification order consistency 的保证，还有如下的保证：
 
@@ -232,9 +234,9 @@ The following four requirements are guaranteed for **all atomic operations**:
 
 - synchronizes-with 关系：如果 thread A 中的存在一个对 atomic object M 的 release atomic store，thread B 中存在一个对 atomic object M 的 acquire atomic load，如果在运行时 thread B 中的 acquire atomic load 读取到的是 thread A 中 release atomic store 写入的值，那么就称 thread A 中的 release atomic store 与 thread B 中的 acquire atomic load 形成了 synchronizes-with 关系。
 
-    如果 thread A 中的 release atomic store 与 thread B 中的 acquire atomic load 形成了 synchronizes-with 关系，那么会保证：thread A 中在源码上位于该 release atomic store 之前的所有 memory writes 都是对 thread B 是可见的，thread B 保证会看到 thread A 中在源码上位于该 release atomic store 之前的操作所写入内存的内容。
+  如果 thread A 中的 release atomic store 与 thread B 中的 acquire atomic load 形成了 synchronizes-with 关系，那么会保证：thread A 中在源码上位于该 release atomic store 之前的所有 memory writes 都是对 thread B 是可见的，thread B 保证会看到 thread A 中在源码上位于该 release atomic store 之前的操作所写入内存的内容。
 
-    只有在程序实际运行时才能确定是否建立了 synchronizes-with 关系，因为 thread B 中的 acquire atomic load 是否读取到的是 thread A 中 release atomic store 存储的值只有在程序实际运行时才能确定。
+  只有在程序实际运行时才能确定是否建立了 synchronizes-with 关系，因为 thread B 中的 acquire atomic load 是否读取到的是 thread A 中 release atomic store 存储的值只有在程序实际运行时才能确定。
 
 注意：
 
@@ -302,17 +304,19 @@ The following four requirements are guaranteed for **all atomic operations**:
 
 ### sequentially-consistent ordering
 
-> `memory_order_seq_cst`: A load operation with this memory order performs an *acquire operation*, a store performs a *release operation*, and read-modify-write performs both an *acquire operation* and a *release operation*, plus a ***single total modification order*** of all atomic operations that are so tagged.
+> `memory_order_seq_cst`: A load operation with this memory order performs an *acquire operation*, a store performs a *release operation*, and read-modify-write performs both an *acquire operation* and a *release operation*, plus a ***single total order*** exists in which all threads observe all modifications in the same order.
 >
-> ***single total modification order*** means that all threads are guaranteed to see the same order of memory operations on atomic variables.
+> There is a ***single total order S*** on all memory_order_seq_cst operations, including fences...
+>
+> ***single total order*** means that all threads are guaranteed to see the same order of memory operations on atomic variables.
 
-`memory_order_seq_cst` 是比 `memory_order_acquire` 和 `memory_order_release` 更“强”的 memory order。使用 `memory_order_seq_cst` 的 atomic load 有着与 `memory_order_acquire` 一样的语义，使用 `memory_order_seq_cst` 的 atomic store 有着与 `memory_order_release` 一样的语义，并且所有使用 `memory_order_seq_cst` 的 operations 之间（包括 atomic load, atomic store 和 atomic_thread_fence）存在 **single total modification order**。
+`memory_order_seq_cst` 是比 `memory_order_acquire` 和 `memory_order_release` 更“强”的 memory order。使用 `memory_order_seq_cst` 的 atomic load 有着与 `memory_order_acquire` 一样的语义，使用 `memory_order_seq_cst` 的 atomic store 有着与 `memory_order_release` 一样的语义，并且所有使用 `memory_order_seq_cst` 的 operations 之间（不仅包括 atomic load, store 还包括 atomic fence）存在一 **single total order**。
 
-注：不要混淆 `memory_order_seq_cst` 保证的 **single total modification order** 与 `memory_order_relaxed` 保证的 **modification order consistency** 。
+注：不要混淆 `memory_order_seq_cst` 保证的 **single total order** 与 `memory_order_relaxed` 保证的 **modification order consistency** 。
 
 - `memory_order_relaxed` 保证的 **modification order consistency** 是不同的线程对同一个 object 的 atomic operations 的 modification order。
 
-- `memory_order_seq_cst` 保证的 **single total modification order** 则是不同线程对所有 `memory_order_seq_cst` 的 atomic operations 之间的 modification order。
+- `memory_order_seq_cst` 保证的 **single total order** 则是不同线程对所有 `memory_order_seq_cst` 的 atomic operations 的 order。
 
 下面通过几个例子来理解 sequentially-consistent ordering：
 
@@ -333,15 +337,15 @@ The following four requirements are guaranteed for **all atomic operations**:
    +-------------------------------------------------------------------------+
    ```
 
-   初始时 x = y = false, z = 0，当这 4 个 threads 执行结束后，z 值一定不为 0。这是因为 `memory_order_seq_cst` 保证所有 `memory_order_seq_cst` 的 atomic operations 之间存在 **single total modification order**。在本例中，只有 x 和 y 两个 atomic object，正好 4 个 threads 中对 x 和 y 的 atomic operations 使用的都是 `memory_order_seq_cst`，所以本例中只存在两种 single total modification order：
+   初始时 x = y = false, z = 0，当这 4 个 threads 执行结束后，z 值一定不为 0。这是因为 `memory_order_seq_cst` 保证所有 `memory_order_seq_cst` 的 atomic operations 之间存在一 **single total order**。在本例中，只有 x 和 y 两个 atomic object，正好 4 个 threads 中对 x 和 y 的 atomic operations 使用的都是 `memory_order_seq_cst`，所以 `x.store(true)` 和 `y.store(true)` 在 single total order 中只存在两种可能的顺序：
 
-   1. X-Y 即在 single total modification order 中对 x 的修改先于对 y 的修改。这样，当 thread 4 读取到的 y 的值为 true 时，此时 thread 4 读取到的 x 的值也一定为 true，因此 `++z` 一定会执行，所以 z 一定不为 0。
+   1. X-Y 即在 single total order 中对 x 的修改先于对 y 的修改。这样，当 thread 4 读取到的 y 的值为 true 时，此时 thread 4 读取到的 x 的值也一定为 true，因此 `++z` 一定会执行，所以 z 一定不为 0。
 
-   2. Y-X 即在 single total modification order 中对 y 的修改先于对 x 的修改。这样，当 thread 3 读取到的 x 的值为 true 时，此时 thread 3 读取到的 y 的值也一定为 true，因此 `++z` 一定会执行，所以 z 一定不为 0。
+   2. Y-X 即在 single total order 中对 y 的修改先于对 x 的修改。这样，当 thread 3 读取到的 x 的值为 true 时，此时 thread 3 读取到的 y 的值也一定为 true，因此 `++z` 一定会执行，所以 z 一定不为 0。
 
    问题：如果将本例中对 x 和 y 的 load/store 使用的 memory order 修改为 `memory_order_acquire`/`memory_order_release`，那么当 4 个 threads 执行结束后，z 的值是否还能保证一定不为 0 ？
 
-   答案：不能保证，即 z 的值可能为 0。因为 release-acquire ordering 不能保证 **single total modification order**。对于 thread 3 可能是先观测到 x 先被修改为 true 然后再观测到 y 被修改为 true，当 thread 3 执行 `y.load(std::memory_order_seq_cst)` 时还没观测到 y 被修改为 true，所以 thread 3 的 `++z` 不会被执行；对于 thread 4 可能是先观测到 y 先被修改为 true 然后再观测到 x 被修改为 true，当 thread 4 执行 `x.load(std::memory_order_seq_cst)` 时还没观测到 x 被修改为 true，所以 thread 4 的 `++z` 不会被执行。因此当 4 个 threads 执行结束后，z 的值可能为 0。
+   答案：不能保证，即 z 的值可能为 0。因为 release-acquire ordering 不能保证 **single total order**。对于 thread 3 可能是先观测到 x 先被修改为 true 然后再观测到 y 被修改为 true，当 thread 3 执行 `y.load()` 时还没观测到 y 被修改为 true，所以 thread 3 的 `++z` 不会被执行；对于 thread 4 可能是先观测到 y 先被修改为 true 然后再观测到 x 被修改为 true，当 thread 4 执行 `x.load()` 时还没观测到 x 被修改为 true，所以 thread 4 的 `++z` 不会被执行。因此当 4 个 threads 执行结束后，z 的值可能为 0。
 
 2. 考虑如下代码：
 
@@ -365,7 +369,7 @@ The following four requirements are guaranteed for **all atomic operations**:
 
    问题：如果将本例中 `x.store(true, std::memory_order_release)` 修改为 `x.store(true, std::memory_order_seq_cst)`，`y.store(true, std::memory_order_release)` 修改为 `y.store(true, std::memory_order_seq_cst)`，那么当 thread 1 和 thread 2 执行结束后，z 的值是否还可能为 2 ？
 
-   答案：z 的值不可能为 2。
+   答案：z 的值不可能为 2。注意：`memory_order_seq_cst` atomic operations 之间是不能 reorder 的。
 
 ## mapping C++ atomic operations to x86
 
@@ -375,7 +379,7 @@ The following four requirements are guaranteed for **all atomic operations**:
 
 ### relaxed ordering
 
-```
+```Cpp
 int ld_relaxed(std::atomic<int> &i){
     return i.load(std::memory_order_relaxed);
 }
@@ -444,7 +448,7 @@ GCC 和 Clang 为 `memory_order_relaxed` 的 atomic load/store 生成的汇编�
 
 ### release-acquire ordering
 
-```
+```Cpp
 int ld_acquire(std::atomic<int> &i){
     return i.load(std::memory_order_acquire);
 }
@@ -510,7 +514,7 @@ GCC 和 Clang 为 `memory_order_acquire` atomic load 和 `memory_order_release` 
 
 ### sequentially-consistent ordering
 
-```
+```Cpp
 int ld_seq_cst(std::atomic<int> &i){
     return i.load(std::memory_order_seq_cst);
 }
@@ -531,9 +535,9 @@ st_seq_cst(std::atomic<int>&):
   ret
 ```
 
-GCC 和 Clang 为 `memory_order_seq_cst` atomic load 生成的汇编指令是普通的 MOV 指令，为 `memory_order_release` atomic store 生成的汇编指令则是 XCHG 指令。
+GCC 和 Clang 为 `memory_order_seq_cst` atomic load 生成的汇编指令是普通的 MOV 指令，为 `memory_order_seq_cst` atomic store 生成的汇编指令则是 XCHG 指令。
 
-对于 x86，为什么使用 MOV 指令实现 `memory_order_seq_cst` atomic load 配合 XCHG 指令实现 `memory_order_release` atomic store 就能保证 sequentially-consistent 语义呢？
+对于 x86，为什么使用 MOV 指令实现 `memory_order_seq_cst` atomic load 配合 XCHG 指令实现 `memory_order_seq_cst` atomic store 就能保证 sequentially-consistent 语义呢？
 
 回顾下 `memory_order_seq_cst` 的语义：
 
@@ -541,9 +545,9 @@ GCC 和 Clang 为 `memory_order_seq_cst` atomic load 生成的汇编指令是普
 
 - 使用 `memory_order_seq_cst` 的 atomic store 有着与 `memory_order_release` 一样的语义
 
-- 所有 `memory_order_seq_cst` 的 atomic operations 之间存在 ***single total modification order***
+- 所有 `memory_order_seq_cst` 的 atomic operations 之间存在 ***single total order***
 
-在上一节已经说明了 MOV 指令就能保证 release-acquire 语义。所以问题的关键就是如何保证 ***single total modification order*** ？
+在上一节已经说明了 MOV 指令就能保证 release-acquire 语义。所以问题的关键就是如何保证 ***single total order*** ？
 
 在 "Intel® 64 and IA-32 Architectures Software Developer’s Manual" 中有如下相关内容：
 
@@ -584,13 +588,13 @@ GCC 和 Clang 为 `memory_order_seq_cst` atomic load 生成的汇编指令是普
 
 如果 r1 = true, r2 = false, r3 = true, r4 = false，说明：
 
-- 对于 thread 1 来说 x 和 y 的 modification order 是先 x 后 y，当 thread 1 执行 `x.load(std::memory_order_seq_cst)` 时已观测到 x 被修改为 true，当 thread 1 执行 `y.load(std::memory_order_seq_cst)` 时还未观测到 y 被修改为 true
+- 对于 thread 1 来说 `x.store(true, std::memory_order_seq_cst)` 和 `y.store(true, std::memory_order_seq_cst)` 在 single total order 中的顺序是先 x 后 y，当 thread 1 执行 `x.load(std::memory_order_seq_cst)` 时已观测到 x 被修改为 true，当 thread 1 执行 `y.load(std::memory_order_seq_cst)` 时还未观测到 y 被修改为 true
 
-- 对于 thread 2 来说 x 和 y 的 modification order 是先 y 后 x，当 thread 2 执行 `y.load(std::memory_order_seq_cst)` 时已观测到 y 被修改为 true，当 thread 2 执行 `x.load(std::memory_order_seq_cst)` 时还未观测到 x 被修改为 true
+- 对于 thread 2 来说 `x.store(true, std::memory_order_seq_cst)` 和 `y.store(true, std::memory_order_seq_cst)` 在 single total order 中的顺序是先 y 后 x，当 thread 2 执行 `y.load(std::memory_order_seq_cst)` 时已观测到 y 被修改为 true，当 thread 2 执行 `x.load(std::memory_order_seq_cst)` 时还未观测到 x 被修改为 true
 
-但是实际上 r1 = true, r2 = false, r3 = true, r4 = false 是不可能发生的，`memory_order_release` atomic store 生成的汇编指令是 XCHG 指令，XCHG 指令是隐式的带 LOCK 前缀的指令，"all processors agree on a single execution order of all locked instructions"，所以 thread 1 和 thread 2 观测到的 `x.store(true, std::memory_order_seq_cst);` 和 `x.store(true, std::memory_order_seq_cst);` 的执行顺序是一样的，即 thread 1 和 thread 2 观测到的 x 和 y 的 modification order 是一样的。
+但是实际上 r1 = true, r2 = false, r3 = true, r4 = false 是不可能发生的，`memory_order_seq_cst` atomic store 生成的汇编指令是 XCHG 指令，XCHG 指令是隐式的带 LOCK 前缀的指令，"all processors agree on a single execution order of all locked instructions"，所以 thread 1 和 thread 2 观测到的 `x.store(true, std::memory_order_seq_cst);` 和 `y.store(true, std::memory_order_seq_cst);` 的执行顺序是一样的，即 thread 1 和 thread 2 观测到的 x 和 y 的修改的顺序是一样的。
 
-基于这个例子应该就对“为什么使用 MOV 指令实现 `memory_order_seq_cst` atomic load 配合 XCHG 指令实现 `memory_order_release` atomic store 就能保证 sequentially-consistent 语义”能有一定的理解了。但是可能还是有一些混沌，继续阅读下一节 "x86-TSO programmer's model" 可以消除这些疑惑和不解。
+基于这个例子应该就对“为什么使用 MOV 指令实现 `memory_order_seq_cst` atomic load 配合 XCHG 指令实现 `memory_order_seq_cst` atomic store 就能保证 sequentially-consistent 语义”能有一定的理解了。但是可能还是有一些混沌，继续阅读下一节 "x86-TSO programmer's model" 可以消除这些疑惑和不解。
 
 ## x86-TSO(Total Store Ordering) programmer's model
 
@@ -908,7 +912,7 @@ litmus tests 中使用的符号约定如下：
 
   - `atomic_thread_fence(memory_order_acq_rel)`，既是 acquire fence 也是 release fence。
 
-  - `atomic_thread_fence(memory_order_seq_cst)`，既是 acquire fence 也是 release fence，还保证所有使用 `memory_order_seq_cst` 的 operations 之间（包括 atomic load, atomic store 和 atomic_thread_fence）存在 ***single total modification order***。
+  - `atomic_thread_fence(memory_order_seq_cst)`，既是 acquire fence 也是 release fence，还保证所有使用 `memory_order_seq_cst` 的 operations 之间（包括 atomic_thread_fence）存在 ***single total order***。
 
   注意，`atomic_thread_fence` 对 reordering 的限制要比使用相同 std::memory_order 的 atomic load/store 更强（建议阅读 https://preshing.com/20131125/acquire-and-release-fences-dont-work-the-way-youd-expect/）。
 
