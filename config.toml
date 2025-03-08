@@ -4,10 +4,6 @@ title = "Enna1's website"
 theme = ["mainroad", "hugo-embed-pdf-shortcode"]
 disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Disqus shortname
 
-[Author] # Used in authorbox
-  name = "Enna1"
-  bio = "Nobody dies a virgin, life fucks us all!"
-
 [Params]
   description = "Enna1's website" # Site description. Used in meta description
   copyright = "Enna1" # Footer copyright holder, otherwise will use site title
@@ -20,6 +16,10 @@ disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Di
   # Do not show podcast content in home
   mainSections = ["post", "random"] # mainSections = ["post", "podcast"]
   mathjax = false # Enable MathJax
+
+[Params.Author] # Used in authorbox
+  name = "Enna1"
+  bio = "Nobody dies a virgin, life fucks us all!"
 
 [Params.logo]
   subtitle = "Nobody dies a virgin, life fucks us all!" # Logo subtitle
