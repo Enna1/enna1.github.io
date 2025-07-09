@@ -2,7 +2,18 @@ baseURL = 'https://enna1.github.io/'
 languageCode = 'en-us'
 title = "Enna1's website"
 theme = ["mainroad", "hugo-embed-pdf-shortcode"]
-disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Disqus shortname
+
+[services.disqus]
+  shortname = "enna1-github-io" # Enable Disqus by entering your Disqus shortname
+
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.extensions]
+      [markup.goldmark.extensions.passthrough]
+        enable = true
+        [markup.goldmark.extensions.passthrough.delimiters]
+          block = [['\[', '\]'], ['$$', '$$']]
+          inline = [['\(', '\)'], ['$', '$']]
 
 [Params]
   description = "Enna1's website" # Site description. Used in meta description
@@ -15,7 +26,7 @@ disqusShortname = 'enna1-github-io' # Enable Disqus comments by entering your Di
   post_meta = ["date", "categories"] # Order of post meta information
   # Do not show podcast content in home
   mainSections = ["post", "random"] # mainSections = ["post", "podcast"]
-  mathjax = false # Enable MathJax
+  math = false # Enable MathJax
 
 [Params.Author] # Used in authorbox
   name = "Enna1"

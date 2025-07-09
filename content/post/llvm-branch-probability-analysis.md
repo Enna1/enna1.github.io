@@ -5,7 +5,7 @@ categories:
   - "Programming"
 tags:
   - "LLVM"
-katex: true
+math: true
 comments: true # Enable Disqus comments for specific page
 toc: true
 ---

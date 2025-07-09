@@ -6,7 +6,7 @@ categories:
 tags:
   - "Paper Reading"
   - "Vectorizer"
-katex: true
+math: true
 comments: true # Enable Disqus comments for specific page
 toc: true
 ---

@@ -7,7 +7,7 @@ tags:
 - "C++"
 - "LLVM"
 - "Sanitizer"
-katex: true
+math: true
 comments: true # Enable Disqus comments for specific page
 toc: true
 ---
@@ -46,35 +46,35 @@ int main() {
 有关 strict aliasing rule 在 [C++ 17 标准](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/n4659.pdf)中 [basic.lval] 一节有如下描述：
 
 > If a program attempts to access the stored value of an object through a glvalue of other than one of the following types the behavior is undefined:
-> 
+>
 > (8.1) — the dynamic type of the object,
-> 
+>
 > (8.2) — a cv-qualified version of the dynamic type of the object,
-> 
+>
 > (8.3) — a type similar (as defined in 7.5) to the dynamic type of the object,
-> 
+>
 > (8.4) — a type that is the signed or unsigned type corresponding to the dynamic type of the object,
-> 
+>
 > (8.5) — a type that is the signed or unsigned type corresponding to a cv-qualified version of the dynamic type of the object,
-> 
+>
 > (8.6) — an aggregate or union type that includes one of the aforementioned types among its elements or nonstatic data members (including, recursively, an element or non-static data member of a subaggregate or contained union),
-> 
+>
 > (8.7) — a type that is a (possibly cv-qualified) base class type of the dynamic type of the object,
-> 
+>
 > (8.8) — a char, unsigned char, or std::byte type.
-> 
+>
 > The intent of this list is to specify those circumstances in which an object may or may not be aliased.
 
 [C++ 20 标准](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/n4849.pdf)中 [basic.lval] 一节的描述则更为精简：
 
 > If a program attempts to access (3.1) the stored value of an object through a glvalue whose type is not similar (7.3.5) to one of the following types the behavior is undefined:
-> 
+>
 > (11.1) — the dynamic type of the object,
-> 
+>
 > (11.2) — a type that is the signed or unsigned type corresponding to the dynamic type of the object, or
-> 
+>
 > (11.3) — a char, unsigned char, or std::byte type.
-> 
+>
 > The intent of this list is to specify those circumstances in which an object may or may not be aliased.
 
 因为我不是 C++ language lawyer，所以也就不尝试一一解释上述标准中每一条描述的情况了，在 [What is Strict Aliasing and Why do we Care? · GitHub](https://gist.github.com/shafik/848ae25ee209f698763cffee272a58f8#what-the-c17-draft-standard-say) 这篇文章中，作者对 C++ 17 标准中规定的每一种情况都列举了对应的示例代码来解释说明。
@@ -233,13 +233,13 @@ END
 - Step 1：初始化 Group 集合：{ {T}, {S1}, {S2}, {S3} }
 
 - Step 2：
-  
+
   - 根据 `t := s1; (* Statement 1*)` 更新 Group：Type(t) = T, Type(s1) = S1, Ga = {T}, Gb = {S1}, Group = { {T}, {S1}, {S2}, {S3} } - {T} - {S1} + {T, S1} = { {T, S1}, {S2}, {S3} }
-  
+
   - 根据 `t := s2; (* Statement 2*)` 再更新 Group：Type(t) = T, Type(s2) = S2, Ga = {T, S1}, Gb = {S2}, Group = { {T, S1}, {S2}, {S3} } - {T, S1} - {S2} + {T, S1, S2} = { {T, S1, S2}, {S3} }
 
 - Step 3：根据 Group 集合得到 TypeRefsTable 如下：
-  
+
   | Type | TypeRefsTable(Type) |
   | ---- | ------------------- |
   | T    | T, S1, S2           |
@@ -307,9 +307,9 @@ entry:
 TBAA metadata node 一共有三种：scalar type node, struct type node 和 path tag node。TBAA type node 之间会形成 DAG。
 
 - scalar type node
-  
+
   下述 metadata node 都是 scalar type node。
-  
+
   ```
   !7 = !{!"int", !8, i64 0}
   !8 = !{!"omnipotent char", !9, i64 0}
@@ -318,44 +318,44 @@ TBAA metadata node 一共有三种：scalar type node, struct type node 和 path
   !13 = !{!"float", !8, i64 0}
   !14 = !{!"double", !8, i64 0}
   ```
-  
+
   scalar type node 最多由三个字段组成：第一个字段通常是字符串，作为该 scalar type 的标识符；第二个字段表示该节点的父节点；第三个字段是一个常数，如果为 1 表示 [pointsToConstantMemory](https://llvm.org/doxygen/classllvm_1_1AAResults.html#a2017d417fc2e73c8bcc5acb6a0688016) 返回 true。
-  
+
   例如 `!13 = !{!"float", !8, i64 0}` 该节点表示的类型是 float 类型，父节点是 `!8 = !{!"omnipotent char", !9, i64 0}`。
-  
+
   `!8 = !{!"omnipotent char", !9, i64 0}` 表示的则是 char 类型，父节点是 `!9 = !{!"Simple C++ TBAA"}`。这里为什么要在 char 之前加个 omnipotent（万能的） ？还记得我们在 Strict Aliasing Rule 一章中提到的 C++ 标准么，标准中规定 char, unsigned char 或 std::byte 类型的指针能够合法访问任意其他类型的对象，所以这里用 "omnipotent char" 表示 char 类型可能与任意其他类型之间存在别名关系。（注：C++ 标准中说的是 char, unsigned char 并没有包括 signed char，C 标准则是 char, signed char 和 unsigned char 都包含了，这里 clang 在处理 C++ 时“不太标准”，[为 signed char 也生成了 “omnipotent char” TBAA metadata node](https://github.com/llvm/llvm-project/blob/llvmorg-15.0.0/clang/lib/CodeGen/CodeGenTBAA.cpp#L121)）
-  
+
   `!9 = !{!"Simple C++ TBAA"}` 就是根节点了，所以只有一个标识符字段。这里 "Simple C++ TBAA" 的作用主要是说明这部分 LLVM IR 是 C++ 代码生成的。不同的编译器前端比如 clang, rustc 在生成 TBAA metadata 时生成的根结点是不同的，LLVM 优化时会保守地认为两个根节点不同的 type node 存在别名关系。
 
 - struct type node
-  
+
   struct type node 由标识符和多个 pair 组成，struct 有多少个成员变量就有多少个 pair。pair 的第一个元素表示成员变量的类型，指向其他的 TBAA type node，pair 的第二个字段表示成员变量的偏移。
-  
+
   例如 struct S1 有 2 个成员变量，所以 `!6 = !{!"_ZTS2S1", !7, i64 0, !10, i64 8}` 由标识符和 2 个 pair 组成。`!7` 表示 struct S1 的第一个成员变量类型是 int，`i64 0` 表示 struct S1 的第一个成员变量的偏移是 0，`!10` 表示 struct S1 的第二个成员变量类型是 long，`i64 8` 表示 struct B 的第二个成员变量的偏移是 8。
-  
+
   struct S2 有 3 个成员变量，所以 `!12 = !{!"_ZTS2S2", !13, i64 0, !14, i64 8, !6, i64 16}` 由标识符和 3 个 pair 组成。`!13` 表示 struct S2 的第一个成员变量类型是 float，`i64 0` 表示 struct S2 的第一个成员变量的偏移是 0，`!14` 表示 struct S2 的第二个成员变量类型是 double，`i64 8` 表示 struct B 的第二个成员变量的偏移是 8，`!16` 表示 struct S2 的第三个成员变量类型是 struct S1，`i64 16` 表示 struct B 的第三个成员变量的偏移是 16。
 
 - path tag node
-  
+
   path tag node 用于标识一次 load/store，attach 到  的 load/store 指令后的 `!tbaa` 就是 TBAA path tag node。path tag node 由四个字段组成：第一个字段是 base type node，可以是 scalar type node 或 struct type node；第二个字段是 access type node，一定是 scalar type node；第三个字段是偏移；第四个字段是可选字段，与 scalar type node 的最后一个字段有着同样的意义，如果为 1 表示本次访问的是 [pointsToConstantMemory](https://llvm.org/doxygen/classllvm_1_1AAResults.html#a2017d417fc2e73c8bcc5acb6a0688016)。
-  
+
   ```
   p2->s.i = 2;
   ```
-  
+
   对应的 LLVM IR 就是：
-  
+
   ```
     %s = getelementptr inbounds %struct.S2, ptr %p2, i64 0, i32 2
     store i32 2, ptr %s, align 8, !tbaa !11
   ```
-  
+
   `!11 = !{!12, !7, i64 16}` path tag node 表示的就是对 `S2.s.i` 的访问：
-  
+
   - `!12` 表示 `S2.s.i` 访问的 base type 是 _ZTS2S2 即 struct S2
-  
+
   - `!7` 表示 `S2.s.i` 访问的 access type 是 int
-  
+
   - `i64 16` 表示 `S2.s.i` 访问的 i 相对 S2 的偏移是 16
 
 #### Type DAG
@@ -363,22 +363,22 @@ TBAA metadata node 一共有三种：scalar type node, struct type node 和 path
 TBAA type node 之间构成了一个 type DAG。
 
 - 对于 scalar type node，DAG 中会有一条以该节点为起点，以其父节点为终点的边。例如：
-  
+
   ```
   !7 = !{!"int", !8, i64 0}
   !8 = !{!"omnipotent char", !9, i64 0}
   ```
-  
+
   在 DAG 中就存在一条由 int 节点指向 omnipotent char 节点的边。
 
 - 对于 struct type node，DAG 中会有以该节点为起点，以其成员变量类型节点为终点的边。例如：
-  
+
   ```
   !6 = !{!"_ZTS2S1", !7, i64 0, !10, i64 8}
   !7 = !{!"int", !8, i64 0}
   !10 = !{!"long", !8, i64 0}
   ```
-  
+
   在 DAG 中有两条以 struct S1 为起点的边，终点分别为节点 int 和节点 long。
 
 回到本节最开始我们给出的例子：
@@ -869,9 +869,9 @@ int main(void) {
 ```
 
 3. 执行 `*x = 0`时，发现 `x` 的 TypeDescriptorFromShadowMemory 值为 -4，TypeDescriptorFromMetadata 为 __tysan_v1_int_o_0。显然 TypeDescriptorFromShadowMemory 不等于 TypeDescriptorFromMetadata，所以调用 `__tysan_check()` 函数检查是否存在 type-based aliasing violations。
-   
+
    1. 因为 TypeDescriptorFromShadowMemory 为 -4 表示的是偏移，更新 TypeDescriptorFromShadowMemory 指向 __tysan_v1_long_o_0。
-   
+
    2. 此时检查是否存在 type-based aliasing violations 就是检查 `!isAliasingLegal(__tysan_v1_int_o_0, __tysan_v1_long_o_0)` 的返回值。显然  __tysan_v1_int_o_0 和 __tysan_v1_long_o_0 不是 legal aliasing，即 `!isAliasingLegal(__tysan_v1_int_o_0, __tysan_v1_long_o_0)` 返回值为 true。
 
 4. 最后调用 `reportError()` 函数报错，报错信息如下：

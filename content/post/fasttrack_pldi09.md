@@ -6,7 +6,7 @@ categories:
 tags:
   - "Paper Reading"
   - "Data Race"
-katex: true
+math: true
 comments: true # Enable Disqus comments for specific page
 toc: true
 ---
@@ -123,7 +123,7 @@ $inc_t$ 表示递增 vector clock 的表示线程 $t$ 的那个元素。
 
 - 因为 $4 \leq 5$ ，$0 \leq 8$ 所以 $C_1 \sqsubseteq C_2$
 
-- $C_1 \sqcup C_2 \;=\;<max(4, 5), max(0, 8)> \;=\;<5, 8>$
+- $C_1 \sqcup C_2 \;=\;<\max(4, 5), \max(0, 8)> \;=\;<5, 8>$
 
 - 因为此例中只有 2 个线程所以 $\bot_C =\; <0, 0>$
 
@@ -266,11 +266,11 @@ Read Operations 又细分为 4 条规则：
 
 - **[FT READ EXCLUSIVE]**
 
-  此时程序执行的操作是 $rd(t, x)$，即线程 $t$ 读变量 $x$。如果此时 $R_x$ 是用 epoch 表示的 ($R_x \in Epoch$)，并且前一次对变量 $x$ 的读 happen-before 此时线程 $t$ 对变量 $x$ 的读 ($$R_x \preceq C_t$)，前一次对变量 $x$ 的写 happen-before 此时线程 $t$ 对变量 $x$ 的读 ($W_x \preceq C_t$)，那么我们只需更新 epoch $R_x$ 为 $E(t)$ 即可。$E(t)$ 表示线程 $t$ 的当前 epoch $c@t$，其中 $c=C_t(t)$ 即线程 $t$ 的当前 clock
+  此时程序执行的操作是 $rd(t, x)$，即线程 $t$ 读变量 $x$。如果此时 $R_x$ 是用 epoch 表示的 ($R_x \in Epoch$)，并且前一次对变量 $x$ 的读 happen-before 此时线程 $t$ 对变量 $x$ 的读 ($R_x \preceq C_t$)，前一次对变量 $x$ 的写 happen-before 此时线程 $t$ 对变量 $x$ 的读 ($W_x \preceq C_t$)，那么我们只需更新 epoch $R_x$ 为 $E(t)$ 即可。$E(t)$ 表示线程 $t$ 的当前 epoch $c@t$，其中 $c=C_t(t)$ 即线程 $t$ 的当前 clock
 
 - **[FT READ SHARE]**
 
-  此时程序执行的操作是 $rd(t, x)$，即线程 $t$ 读变量 $x$。如果此时 $R_x$ 是用 epoch 表示的 ($R_x = c@u$)，并且前一次对变量 $x$ 的写 happen-before 此时线程 $t$ 对变量 $x$ 的读 ($W_x \preceq C_t$)，但是前一次对变量 $x$ 的读与此时线程 $t$ 对变量 $x$ 的读没有 happen-before 关系 ($$R_x \preceq C_t$)，那么我们需把 epoch $R_x$ 转换为 vector clock $R_x$，线程 $u$ 的 clock 是 c，线程 t 的 clock 是 $C_t(t)$。形式化表示 $V=\bot_V[t:=C_t(t), u:=c], R'=R[x:=V]$
+  此时程序执行的操作是 $rd(t, x)$，即线程 $t$ 读变量 $x$。如果此时 $R_x$ 是用 epoch 表示的 ($R_x = c@u$)，并且前一次对变量 $x$ 的写 happen-before 此时线程 $t$ 对变量 $x$ 的读 ($W_x \preceq C_t$)，但是前一次对变量 $x$ 的读与此时线程 $t$ 对变量 $x$ 的读没有 happen-before 关系 ($R_x \preceq C_t$)，那么我们需把 epoch $R_x$ 转换为 vector clock $R_x$，线程 $u$ 的 clock 是 c，线程 t 的 clock 是 $C_t(t)$。形式化表示 $V=\bot_V[t:=C_t(t), u:=c], R'=R[x:=V]$
 
 #### Write Operations
 
