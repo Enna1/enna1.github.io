@@ -3,7 +3,6 @@ title: "A whirlwind tour of the LLVM optimizer"
 date: 2023-05-15
 categories:
   - "Random"
-katex: false
 comments: true # Enable Disqus comments for specific page
 enableInlineShortcodes: true # hugo-embed-pdf-shortcode
 ---

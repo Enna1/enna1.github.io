@@ -1,13 +1,12 @@
 ---
-title: "Learn Relocation by Debugging a HWASAN Linker Error
-"
+title: "Learn Relocation by Debugging a HWASAN Linker Error"
 date: 2023-05-30
 categories:
   - "Programming"
 tags:
+  - "ELF"
   - "Sanitizer"
   - "LLVM"
-katex: false
 comments: true # Enable Disqus comments for specific page
 toc: true
 ---

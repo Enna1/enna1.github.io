@@ -3,7 +3,6 @@ title: "写在参加工作三周年之际"
 date: 2024-07-13
 categories:
   - "Random"
-katex: false
 comments: true # Enable Disqus comments for specific page
 ---
 

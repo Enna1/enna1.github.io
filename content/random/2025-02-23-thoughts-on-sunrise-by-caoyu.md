@@ -3,7 +3,6 @@ title: "2025.2.16 北京人艺《日出》"
 date: 2025-02-23
 categories:
   - "Random"
-katex: false
 comments: true # Enable Disqus comments for specific page
 ---
 

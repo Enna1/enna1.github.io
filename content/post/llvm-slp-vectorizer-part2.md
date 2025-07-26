@@ -6,7 +6,6 @@ categories:
 tags:
   - "LLVM"
   - "Vectorizer"
-katex: false
 comments: true # Enable Disqus comments for specific page
 toc: true
 ---
@@ -20,7 +19,7 @@ toc: true
 在上一篇文章 [SLP Vectorizer: Part 1 - Implementation in LLVM](https://enna1.github.io/post/llvm-slp-vectorizer-part1/) 的最后，我提到在 [2013 LLVM Developers’ Meeting: “Vectorization in LLVM”](https://www.youtube.com/watch?v=TVV5v5R43nA) 的最后有人问道：
 
 > Q: Do you happen to know how the speed ups from the two vectorizers (Loop Vectorizer and SLP Vectorizer) split out? One of them is more important or is it kind of equal?
-> 
+>
 > A: The loop vectorizer is a lot more important.
 
 Loop Vectorizer 于 [LLVM 3.2](https://releases.llvm.org/3.2/docs/ReleaseNotes.html#whatsnew) 引入，于 [LLVM 3.3](https://github.com/llvm/llvm-project/commit/1cd71a771cbec872ea820f9226bcffb73c99efe8) 默认开启；SLP Vectorizer 于 [LLVM 3.3](https://releases.llvm.org/3.3/docs/ReleaseNotes.html#slp-vectorizer) 引入，于 [LLVM 3.4](https://github.com/llvm/llvm-project/commit/f479b74a9526b07120a4203c0bc7b27fc21f983f) 默认开启。现在距离 2013 年引入 SLP Vectorizer 已经有 10 年了，SLP Vectorizer 是否还是像 Nadav Rotem 在 2013 LLVM DevMtg 上说的那样（与 Loop Vectorizer 相比）只能带来很有限性能提升呢 。本着“实践是检验真理的唯一标准”的原则，本文通过实验来分析 SLP Vectorizer 能带来多少性能提升。
@@ -40,20 +39,20 @@ Loop Vectorizer 于 [LLVM 3.2](https://releases.llvm.org/3.2/docs/ReleaseNotes.h
 本文就基于 SPEC CPU 2017 测试 SLP Vectorizer。
 
 1. 安装 SPEC CPU 2017，执行 `$SPEC_CPU2017_PATH/install.sh` 会输出如下内容：
-   
+
    ```
    SPEC CPU2017 Installation
-   
+
    Top of the CPU2017 tree is '$SPEC_CPU2017_PATH'
-   
+
    Installing FROM $SPEC_CPU2017_PATH
    Installing TO $SPEC_CPU2017_PATH
-   
+
    Is this correct? (Please enter 'yes' or 'no')
    ```
 
 2. 配置 llvm-test-suite 使用 SPEC CPU 2017 测试：
-   
+
    ```
    % git clone git@github.com:llvm/llvm-test-suite.git
    % mkdir llvm-test-suite-build
@@ -71,15 +70,15 @@ Loop Vectorizer 于 [LLVM 3.2](https://releases.llvm.org/3.2/docs/ReleaseNotes.h
    ```
 
 3. 编译 SPEC CPU 2017 benchmark & 运行：
-   
+
    ```
    % ninja
-   
+
    % llvm-lit -v -j 1 -o results.json .
    ```
 
 4. 执行脚本 llvm-test-suite/utils/compare.py 来展示和比较运行结果：
-   
+
    ```
    # Make sure pandas and scipy are installed. Prepend `sudo` if necessary.
    % pip install pandas scipy
@@ -227,17 +226,17 @@ test-suite :: External/SPEC/CINT2017speed/998.specrand_is/998.specrand_is.test  
 通过比较 `O3 -fno-vectorize -fno-slp-vectorize`, `O3 -fno-vectorize` 和 `O3` 这 3 次运行，对比 Loop Vectorizer 和 SLP Vectorizer 的优化效果。
 
 - Loop Vectorizer
-  
+
   ```
   % python3 ~/llvm-test-suite/utils/compare.py \
     O3-no-LV-SLP.results.json O3-no-SLP.results.json \
     --no-abs-sort --absolute-diff --filter-short=1
-  
+
   Tests: 32
   Short Running: 12 (filtered out)
   Remaining: 20
   Metric: exec_time
-  
+
   Program         exec_time
                   O3-no-LV-SLP.results O3-no-SLP.results diff
        525.x264_r  44.94                38.31             -6.64
@@ -258,17 +257,17 @@ test-suite :: External/SPEC/CINT2017speed/998.specrand_is/998.specrand_is.test  
   ```
 
 - SLP Vectorizer
-  
+
   ```
   % python3 ~/llvm-test-suite/utils/compare.py  \
     O3-no-SLP.results.json O3.results.json \
     --minimal-names --no-abs-sort --absolute-diff --filter-short=1
-  
+
   Tests: 32
   Short Running: 12 (filtered out)
   Remaining: 20
   Metric: exec_time
-  
+
   Program         exec_time
                   O3-no-SLP.results O3.results diff
        625.x264_s  38.35             24.54     -13.81
@@ -313,7 +312,7 @@ test-suite :: External/SPEC/CINT2017speed/998.specrand_is/998.specrand_is.test  
 ```
 
 - perf report: x264 built with `O3 -fno-vectorize -fno-slp-vectorize`
-  
+
   ```
   Samples: 183K of event 'cycles', Event count (approx.): 139996467543
     Overhead  Command     Shared Object     Symbol
@@ -336,7 +335,7 @@ test-suite :: External/SPEC/CINT2017speed/998.specrand_is/998.specrand_is.test  
   ```
 
 - perf report: x264 built with `O3 -fno-slp-vectorize`
-  
+
   ```
   Samples: 157K of event 'cycles', Event count (approx.): 120606957278
     Overhead  Command     Shared Object     Symbol
@@ -357,7 +356,7 @@ test-suite :: External/SPEC/CINT2017speed/998.specrand_is/998.specrand_is.test  
   ```
 
 - perf report: x264 built with `O3`
-  
+
   ```
   Samples: 100K of event 'cycles', Event count (approx.): 77140113982
     Overhead  Command     Shared Object     Symbol
@@ -457,15 +456,15 @@ static inline void mc_weight( uint8_t *dst, int i_dst_stride, uint8_t *src, int 
 如何验证 `get_ref()` 函数中对 `pixel_avg()` 函数和 `mc_weight()` 函数的调用被 inline 了呢？
 
 - 一方面，可以通过 objdump 查看函数 `get_ref()` 的反汇编来验证。
-  
+
   ```
   % objdump -d ../625.x264_s | awk -v RS= '/^[[:xdigit:]]+ <get_ref>/'
   ```
 
 - 另一方面，可以通过查看编译 x264_src/common/mc.c 时生成 OptimizationRemark 来确认。
-  
+
   因为在编译 SPEC 2017 时为 cmake 添加了 `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` 选项，所以可以在 llvm-test-suite-build/compile_commands.json 中找到编译 x264_src/common/mc.c 使用的命令：
-  
+
   ```
   % $LLVM_BUILD_PATH/bin/clang \
         -DNDEBUG -DSPEC -DSPEC_AUTO_BYTEORDER=0x12345678 -DSPEC_CPU -DSPEC_LINUX \
@@ -476,13 +475,13 @@ static inline void mc_weight( uint8_t *dst, int i_dst_stride, uint8_t *src, int 
         -O3 -w -Werror=date-time -save-stats=obj -save-stats=obj \
         -c $SPEC_CPU2017_PATH/benchspec/CPU/525.x264_r/src/x264_src/common/mc.c
   ```
-  
+
   为上述编译命令添加 `-Rpass="inline|vectorize"` 选项，手动编译 x264_src/common/mc.c，通过查看 OptimizationRemark 可以看到`get_ref()` 函数中对 `pixel_avg()` 函数和 `mc_weight()` 函数的调用确实被 inline 了。
-  
+
   > $SPEC_CPU2017_PATH/benchspec/CPU/525.x264_r/src/x264_src/common/mc.c:244:9: remark: 'pixel_avg' inlined into 'get_ref' with (cost=25, threshold=325) at callsite get_ref:12:9; [-Rpass=inline]
-  > 
+  >
   > $SPEC_CPU2017_PATH/benchspec/CPU/525.x264_r/src/x264_src/common/mc.c:247:13: remark: 'mc_weight' inlined into 'get_ref' with (cost=190, threshold=325) at callsite get_ref:15:13; [-Rpass=inline]
-  > 
+  >
   > $SPEC_CPU2017_PATH/benchspec/CPU/525.x264_r/src/x264_src/common/mc.c:252:9: remark: 'mc_weight' inlined into 'get_ref' with (cost=190, threshold=325) at callsite get_ref:20:9; [-Rpass=inline]
 
 ---
@@ -492,15 +491,15 @@ static inline void mc_weight( uint8_t *dst, int i_dst_stride, uint8_t *src, int 
 在编译 x264_src/common/mc.c 时生成 OptimizationRemark 中同样可以看到，Loop Vectorizer 将 inline 到函数 `get_ref()` 中的 `pixel_avg()` 函数和 `mc_weight()` 函数向量化了：
 
 > $SPEC_CPU2017_PATH/benchspec/CPU/525.x264_r/src/x264_src/common/mc.c:44:9: remark: vectorized loop (vectorization width: 16, interleaved count: 2) [-Rpass=loop-vectorize]
-> 
+>
 > 44 | for( int x = 0; x < i_width; x++ )
-> 
+>
 > $SPEC_CPU2017_PATH/benchspec/CPU/525.x264_r/src/x264_src/common/mc.c:127:13: remark: vectorized loop (vectorization width: 4, interleaved count: 1) [-Rpass=loop-vectorize]
-> 
+>
 > 127 | for( int x = 0; x < i_width; x++ )
-> 
+>
 > $SPEC_CPU2017_PATH/benchspec/CPU/525.x264_r/src/x264_src/common/mc.c:133:13: remark: vectorized loop (vectorization width: 4, interleaved count: 1) [-Rpass=loop-vectorize]
-> 
+>
 > 133 | for( int x = 0; x < i_width; x++ )
 
 详细对比函数 `get_ref()` 在 Loop Vectorizer 前后 LLVM IR 的具体变化，可以在 x264_src/common/mc.c 的编译命令中分别添加 `-mllvm -print-before=loop-vectorize` 和 `-mllvm -print-after=loop-vectorize` 选项，手动编译两次 x264_src/common/mc.c。
@@ -563,7 +562,7 @@ PIXEL_SAD_C( x264_pixel_sad_4x4,    4,  4 )
 首先为上述编译命令添加 `-Rpass="vectorize"` 选项，手动编译 x264_src/common/pixel.c，通过查看 OptimizationRemark 可以看到 x264_src/common/pixel.c:61:1 即函数 `x264_pixel_sad_16x16()` 确实被 SLP Vectorizer 向量化了。
 
 > $SPEC_CPU2017_PATH/benchspec/CPU/525.x264_r/src/x264_src/common/pixel.c:61:1: remark: Vectorized horizontal reduction with cost -47 and with tree size 6 [-Rpass=slp-vectorizer]
-> 
+>
 > 61 | PIXEL_SAD_C( x264_pixel_sad_16x16, 16, 16 )
 
 然后在上述编译命令中分别添加 `-mllvm -print-before=slp-vectorizer` 和 `-mllvm -print-after=slp-vectorizer` 选项，手动编译两次 x264_src/common/pixel.c，对比 SLP Vectorizer 前后 LLVM IR 的具体变化：
@@ -579,15 +578,15 @@ PIXEL_SAD_C( x264_pixel_sad_4x4,    4,  4 )
 在上一篇文章 [SLP Vectorizer: Part 1 - Implementation in LLVM](https://enna1.github.io/post/llvm-slp-vectorizer-part1/) 中提到：SLP Vectorizer 会遍历每个函数的所有基本块，对于每个基本块，依次调用 `vectorizeStoreChains()`，`vectorizeChainsInBlock()`，`vectorizeGEPIndices()` 尝试向量化。对于函数 `x264_pixel_sad_16x16()`，是 `vectorizeChainsInBlock()` 找到了 horizontal reduction 的向量化机会，成功向量化。
 
 - horizontal reduction 如下图所示：
-  
+
   ![](/blog/llvm-slp-vectorizer-part2/x264_pixel_sad_16x16-horizontal_reduction.png)
 
 - 以 horizontal reduction 为根结点构建的 SLP Tree 如下图所示：
-  
+
   ![](/blog/llvm-slp-vectorizer-part2/x264_pixel_sad_16x16-slp_tree.png)
 
 - 函数 `x264_pixel_sad_16x16()` 经 SLP Vectorizer 向量化后的 LLVM IR 非常简洁：
-  
+
   ```
   ; *** IR Dump After SLPVectorizerPass on x264_pixel_sad_16x16 ***
   ; Function Attrs: nofree norecurse nosync nounwind memory(read, inaccessiblemem: none) uwtable
@@ -598,7 +597,7 @@ PIXEL_SAD_C( x264_pixel_sad_4x4,    4,  4 )
     %idx.ext = sext i32 %i_stride_pix1 to i64
     %idx.ext8 = sext i32 %i_stride_pix2 to i64
     br label %for.cond1.preheader
-  
+
   for.cond1.preheader:                              ; preds = %entry, %for.cond1.preheader
     %y.025 = phi i32 [ 0, %entry ], [ %inc11, %for.cond1.preheader ]
     %i_sum.024 = phi i32 [ 0, %entry ], [ %op.rdx, %for.cond1.preheader ]
@@ -617,7 +616,7 @@ PIXEL_SAD_C( x264_pixel_sad_4x4,    4,  4 )
     %inc11 = add nuw nsw i32 %y.025, 1
     %exitcond.not = icmp eq i32 %inc11, 16
     br i1 %exitcond.not, label %for.cond.cleanup, label %for.cond1.preheader, !llvm.loop !30
-  
+
   for.cond.cleanup:                                 ; preds = %for.cond1.preheader
     ret i32 %op.rdx
   }
@@ -634,11 +633,11 @@ PIXEL_SAD_C( x264_pixel_sad_4x4,    4,  4 )
 ## P.S.
 
 1. 如果不开启 Loop Vectorizer 只开启 SLP Vectorizer，SLP Vectorizer 在 x264 上能带来多大的性能提升呢？不开启 Loop Vectorizer 只开启 SLP Vectorizer 运行 SPEC 2017 的结果如下：
-   
+
    - 只开启 Loop Vectorizer，将 x264 运行时间从 44.94s(44.70s) 优化到 38.31s(38.35s)，优化了 6.64s(6.35s)，有相对 14.8%(14.2%) 的收益。
-   
+
    - 只开启 SLP Vectorizer，将 x264 运行时间从 44.94s(44.70s) 优化到 31.28s(31.31s)，优化了 13.67s(13.39s)，有相对 30.4%(30.0%) 的收益。因此，在 x264 上只开启 SLP Vectorizer 带来的性能提升也是大于只开启 Loop Vectorizer 带来的性能提升的。
-   
+
    ```
    Program                                                                        exec_time
                                                                                   O3-no-LV.results
@@ -677,7 +676,7 @@ PIXEL_SAD_C( x264_pixel_sad_4x4,    4,  4 )
    ```
 
 2. 查看 x264 在 O3 优化等级下函数 `x264_pixel_sad_16x16` 的反汇编：
-   
+
    ```
    % objdump -d 625.x264_s | awk -v RS= '/^[[:xdigit:]]+ <x264_pixel_sad_16x16>/'
    000000000000f2e0 <x264_pixel_sad_16x16>:
@@ -700,9 +699,9 @@ PIXEL_SAD_C( x264_pixel_sad_4x4,    4,  4 )
        f318:        c3                           retq
        f319:        0f 1f 80 00 00 00 00         nopl   0x0(%rax)
    ```
-   
+
    LLVM 为函数 `x264_pixel_sad_16x16` 由 LLVM IR 生成汇编时也做了一定的“优化”，生成了 **psadbw** 指令，[PSADBW — Compute Sum of Absolute Differences](https://www.felixcloutier.com/x86/psadbw)：
-   
+
    ```
    TEMP0 := ABS(DEST[7:0] - SRC[7:0])
    (* Repeat operation for bytes 2 through 14 *)
@@ -715,13 +714,13 @@ PIXEL_SAD_C( x264_pixel_sad_4x4,    4,  4 )
    ```
 
 3. `-O3` v.s. `-O3 -march=native -mtune=native`
-   
+
    开启 `-march=native -mtune=native` 选项会多暴露一些优化机会，可以通过 `clang -E - -march=native -mtune=native -###` 查看具体 pass 了哪些 `-target-cpu`, `-tune-cpu`, `-target-feature` 给 cc1。
-   
+
    开启 `-march=native -mtune=native` 选项并不影响本文的结论，具体的开启 `-march=native -mtune=native` 选项后运行 SPEC 2017 的结果如下：
-   
+
    - `-O3 -march=native -mtune=native -fno-vectorize -fno-slp-vectorize`
-     
+
      ```
      Program                                       exec_time
                                                    O3-no-LV-SLP.results
@@ -758,9 +757,9 @@ PIXEL_SAD_C( x264_pixel_sad_4x4,    4,  4 )
      FP2017rate...97.specrand_fr/997.specrand_fr     0.01
      INT2017speed/602.gcc_s/602.gcc_s                0.01
      ```
-   
+
    - `-O3 -march=native -mtune=native -fno-slp-vectorize`
-     
+
      ```
      Program                                       exec_time
                                                    O3-no-SLP.results
@@ -797,9 +796,9 @@ PIXEL_SAD_C( x264_pixel_sad_4x4,    4,  4 )
      INT2017spe...98.specrand_is/998.specrand_is     0.01
      INT2017speed/602.gcc_s/602.gcc_s                0.01
      ```
-   
+
    - `-O3 -march=native -mtune=native`
-     
+
      ```
      Program                                       exec_time
                                                    O3.results

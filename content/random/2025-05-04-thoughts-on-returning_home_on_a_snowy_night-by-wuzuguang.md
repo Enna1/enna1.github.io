@@ -3,7 +3,6 @@ title: "2025.4.27 北京人艺《风雪夜归人》"
 date: 2025-05-04
 categories:
   - "Random"
-katex: false
 comments: true # Enable Disqus comments for specific page
 ---
 
