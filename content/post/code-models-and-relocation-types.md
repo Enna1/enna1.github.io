@@ -1125,7 +1125,7 @@ ELF x86-64-ABI psABI 中列出了所有的 relocation 类型。
 
 Field 字段就是 relocation 占位符的大小，relocation type 如果以数字作为 name 后缀，那么该数字后缀通常与 field 字段对应。例如 R_X86_64_64, R_X86_64_32, R_X86_64_16, R_X86_64_8 分别对应的 field 为 word64, word32, word16, word8。
 
-Calculation 字段描述填充占位符的值是如何计算出来的。根据 relocation calculation 公式计算出来的值必须在 field 可表示的范围内。例如，R_X86_64_32 类型的 relocation 要求计算出来的值要在 `[0, 4294967295]` 区间内，R_X86_64_32 类型的 relocation 要求计算出来的值要在 `[-2147483648, 2147483647]` 区间内。
+Calculation 字段描述填充占位符的值是如何计算出来的。根据 relocation calculation 公式计算出来的值必须在 field 可表示的范围内。例如，R_X86_64_32 类型的 relocation 要求计算出来的值要在 `[0, 4294967295]` 区间内，R_X86_64_32S 类型的 relocation 要求计算出来的值要在 `[-2147483648, 2147483647]` 区间内。
 
 通过不同 relocation types 的计算公式，可以理解不同的 relocation types 的使用场景：
 
@@ -1413,7 +1413,7 @@ Clang/LLVM 确定选择哪种 relocation type 的实现细节。
 
 ## P.S.
 
-1. Clang 默认启用 fPIE,-pie 和 x86 relax relocations
+1. Clang 默认启用 -fPIE,-pie 和 x86 relax relocations
 
    - [[CMake] Default ENABLE_X86_RELAX_RELOCATIONS to ON](https://github.com/llvm/llvm-project/commit/c41a18cf61790fc898dcda1055c3efbf442c14c0)
 
