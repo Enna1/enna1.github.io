@@ -1,0 +1,9 @@
+{{ define "main" }}
+  {{ $aboutPage := .Site.GetPage "page" "about" }}
+  {{ if $aboutPage }}
+    <h1>{{ $aboutPage.Title }}</h1>
+    <section class="about-section">
+      <div class="content">{{ $aboutPage.Content }}</div>
+    </section>
+  {{ end }}
+{{ end }}

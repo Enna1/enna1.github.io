@@ -1,0 +1,10 @@
+{{- with resources.Get "css/main.css" }}
+  {{- $renderedCss := . | resources.ExecuteAsTemplate "css/rendered-main.css" . }}
+  {{- if hugo.IsDevelopment }}
+    <link rel="stylesheet" href="{{ $renderedCss.RelPermalink }}">
+  {{- else }}
+    {{- with $renderedCss | minify | fingerprint }}
+      <link rel="stylesheet" href="{{ .RelPermalink }}" integrity="{{ .Data.Integrity }}" crossorigin="anonymous">
+    {{- end }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,106 @@
+:root {
+  --sys-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Droid Sans", "Helvetica Neue";
+  --zh-font-family: "PingFang SC", "Hiragino Sans GB", "Droid Sans Fallback", "Microsoft YaHei";
+  --base-font-family: var(--sys-font-family), var(--zh-font-family), sans-serif;
+  --code-font-family: Menlo, Monaco, Consolas, "Courier New", var(--zh-font-family), monospace;
+}
+
+html {
+  scrollbar-gutter: stable both-edges;
+}
+
+body {
+  font-family: var(--base-font-family);
+  font-size: 16px;
+  line-height: 1.4;
+  margin: 0 auto;
+  width: 100%;
+  max-width: 900px;
+  padding: 0 1rem;
+  min-height: 100%;
+  overflow-wrap: break-word;
+  display: block;
+}
+
+nav.menu {
+  padding: 0.625rem;
+  background-color: #dff;
+}
+
+blockquote {
+  margin: 0 1em;
+  padding-left: 1em;
+  border-left-style: solid;
+  border-left-width: 4px;
+  border-left-color: #ccf;
+}
+
+p { margin: 1rem 0; }
+
+li { margin: 0.2rem 0; }
+
+a {
+  text-decoration: none;
+  &:hover { text-decoration: underline; }
+}
+
+figure {
+  margin: 0 0 1.25rem;
+  width: fit-content;
+}
+
+img {
+  max-width: 100%;
+  display: block;
+  margin: 0 auto;
+}
+
+pre,
+code {
+  background-color: #fff;
+  border: 1px solid #ebebeb;
+  font-family: var(--code-font-family);
+}
+
+code {
+  padding: 0 0.2em;
+}
+
+pre {
+  display: block;
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+  overflow: auto;
+  color: #000;
+}
+
+pre code {
+  padding: 0;
+  color: inherit;
+  white-space: inherit;
+  background: inherit;
+  border: 0;
+}
+
+table { width: 100%; }
+
+table, th, td {
+  border-collapse: collapse;
+  border: 1px solid #ebebeb;
+  padding: 0.4rem;
+}
+
+.post-item {
+  list-style: none;
+}
+
+.post-date {
+  font-size: 83%;
+  font-style: italic;
+  color: #999;
+}
+
+.footer {
+  font-size: 83%;
+  margin-top: 2rem;
+}

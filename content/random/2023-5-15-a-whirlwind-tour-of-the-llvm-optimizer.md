@@ -68,7 +68,3 @@ todo list of learning llvm optimization passes.
   - FunctionAttrs
 
   - IPSCCP
-
-## Attachment
-
-{{< embed-pdf url="/blog/a-whirlwind-tour-of-the-llvm-optimizer/awhirlwindtourofthellvmoptimizer.pdf" >}}

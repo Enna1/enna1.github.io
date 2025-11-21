@@ -1,10 +1,8 @@
 baseURL = 'https://enna1.github.io/'
 languageCode = 'en-us'
 title = "Enna1's website"
-theme = ["mainroad", "hugo-embed-pdf-shortcode"]
-
-[services.disqus]
-  shortname = "enna1-github-io" # Enable Disqus by entering your Disqus shortname
+theme = ["ownlite"]
+disableKinds = ['taxonomy', 'term']
 
 [markup]
   [markup.goldmark]
@@ -14,108 +12,47 @@ theme = ["mainroad", "hugo-embed-pdf-shortcode"]
         [markup.goldmark.extensions.passthrough.delimiters]
           block = [['\[', '\]'], ['$$', '$$']]
           inline = [['\(', '\)'], ['$', '$']]
+    [markup.goldmark.renderer]
+      unsafe = true
+  [markup.highlight]
+    style = 'github'
 
 [Params]
   description = "Enna1's website" # Site description. Used in meta description
   copyright = "Enna1" # Footer copyright holder, otherwise will use site title
-  opengraph = true
-  twitter_cards = false
-  readmore = true # Show "Read more" button in list if true
-  authorbox = false
-  pager = false # Show "prev", "next" button
-  post_meta = ["date", "categories"] # Order of post meta information
-  # Do not show podcast content in home
-  mainSections = ["post", "random"] # mainSections = ["post", "podcast"]
   math = false # Enable MathJax
 
-[Params.Author] # Used in authorbox
-  name = "Enna1"
-  bio = "Nobody dies a virgin, life fucks us all!"
-
-[Params.logo]
-  subtitle = "Nobody dies a virgin, life fucks us all!" # Logo subtitle
-
-[Params.sidebar]
-  home = "right"
-  list = "right"
-  single = "right"
-  # Enable widgets in given order
-  widgets = ["search", "recent", "categories", "taglist", "social"]
-
-[Params.widgets.social]
-  # Enable parts of social widget
-  github = "Enna1"
-  email = "xumingjie.enna1@bytedance.com"
-
-# Blog RSS link
-[[Params.widgets.social.custom]]
-  title = "Blog RSS"
-  url = "/post/index.xml"
-  icon = "svg/rss.svg" # Optional. Path relative to "layouts/partials" of themes
-
-# Podcast RSS link
-[[Params.widgets.social.custom]]
-  title = "Podcast RSS"
-  url = "/podcast/index.xml"
-  icon = "svg/rss.svg" # Optional. Path relative to "layouts/partials" of themes
-
-[Params.style.vars]
-  highlightColor = "#2393D9"
-
 # config your menu
-[[menu.main]]
-  name = "home"
-  weight = 10
-  identifier = "home"
-  url = "/"
+[menus]
+  [[menu.main]]
+    name = "home"
+    weight = 10
+    identifier = "home"
+    url = "/"
 
-[[menu.main]]
-  name = "blog"
-  weight = 20
-  identifier = "blog"
-  url = "/post/"
+  [[menu.main]]
+    name = "blog"
+    weight = 20
+    identifier = "blog"
+    url = "/blog/"
 
-[[menu.main]]
-  name = "random"
-  weight = 21
-  identifier = "random"
-  url = "/random/"
+  [[menu.main]]
+    name = "random"
+    weight = 30
+    identifier = "random"
+    url = "/random/"
 
-[[menu.main]]
-  name = "podcast"
-  weight = 25
-  identifier = "podcast"
-  url = "/podcast/"
+  [[menu.main]]
+    name = "podcast"
+    weight = 40
+    identifier = "podcast"
+    url = "/podcast/"
 
-[[menu.main]]
- name = "archives"
- weight = 30
- identifier = "archives"
- url = "/archives/"
-
-# [[menu.main]]
-#   name = "categories"
-#   weight = 30
-#   identifier = "categories"
-#   url = "/categories/"
-
-[[menu.main]]
-  name = "codebrowser"
-  weight = 40
-  identifier = "codebrowser"
-  url = "https://codebrowser-llvm.github.io"
-
-[[menu.main]]
-  name = "about"
-  weight = 50
-  identifier = "about"
-  url = "/about/"
-
-[markup.goldmark.renderer]
-  unsafe = true
-
-[markup.highlight]
-  style = 'github'
+  [[menu.main]]
+    name = "github"
+    weight = 50
+    identifier = "github"
+    url = "https://github.com/Enna1"
 
 [Params.Podcast]
   Title = "徐徐道来"

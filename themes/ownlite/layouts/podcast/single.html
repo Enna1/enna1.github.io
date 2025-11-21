@@ -1,0 +1,11 @@
+{{ define "main" -}}
+<article class="single-view{{ with .Section }} single-view--{{ . | urlize }}{{ end }}">
+<header>
+<h1>{{ .Title }}</h1>
+</header>
+{{ partial "podcast.html" . -}}
+<div class="content">
+	{{ .Content }}
+</div>
+</article>
+{{ end }}

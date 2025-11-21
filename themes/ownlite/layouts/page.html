@@ -1,0 +1,14 @@
+{{ define "main" }}
+  <h1>{{ .Title }}</h1>
+  {{ if not .Params.nodate }}
+    <time datetime="{{ .Date.Format "2006-01-02" }}">
+      {{- .Date | dateFormat (.Site.Params.dateformat | default "2006-01-02") -}}
+    </time>
+  {{ end }}
+  {{ if .Params.toc }}
+    <aside>
+      {{ .TableOfContents }}
+    </aside>
+  {{ end }}
+  {{ .Content }}
+{{ end }}
